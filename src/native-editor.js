@@ -5,6 +5,7 @@ const nativeDefaults = (() => {
   return {
     mode: 'module',
     theme: 'system',
+    eventStyle: 'text',
     month: today.slice(0, 7),
     ...config.module,
     course: config.allCalendars ? '' : config.course,
@@ -91,6 +92,7 @@ window.nativeUpdate = function (patch) {
   const editable = [
     'mode',
     'theme',
+    'eventStyle',
     'month',
     'name',
     'start',
@@ -109,6 +111,7 @@ window.nativeUpdate = function (patch) {
   const next = { ...state, ...patch };
   if (!['module', 'month'].includes(next.mode) || !['system', 'light', 'dark'].includes(next.theme))
     throw new Error('Choose a valid view and appearance.');
+  if (!['text', 'boxes'].includes(next.eventStyle)) throw new Error('Choose a valid event style.');
   if (typeof next.includeWeekends !== 'boolean')
     throw new Error('Choose whether to include weekends.');
   if (typeof next.name !== 'string' || !next.name.trim()) throw new Error('Enter a module name.');

@@ -603,3 +603,34 @@ test('native snapshots combine with ICS and preserve all-day dates across time z
     ]),
   );
 });
+
+test('hidden weekends show today beside the correct week without marking Friday as today', () => {
+  const options = {
+    mode: 'month',
+    month: '2026-09',
+    course: '',
+    width: 1280,
+    height: 720,
+  };
+  for (const theme of ['light', 'dark']) {
+    for (const [today, label] of [
+      ['2026-09-12', 'TODAY → Sat 12 Sept'],
+      ['2026-09-13', 'TODAY → Sun 13 Sept'],
+    ]) {
+      const result = renderWallpaper([], { ...options, today, theme });
+      const badge = result.bounds.find((item) => item.text === label);
+      assert.ok(badge);
+      const friday = result.bounds.find((item) => item.text === '11 Sept');
+      assert.equal(badge.y, friday.y);
+      assert.ok(badge.x - badge.width > friday.x + friday.width);
+      assert.equal(result.bounds.filter((item) => item.text.startsWith('TODAY')).length, 1);
+      assert.match(result.svg, /Today is off-screen because weekends are hidden/);
+      const visible = renderWallpaper([], { ...options, today, theme, includeWeekends: true });
+      assert.equal(visible.bounds.filter((item) => item.text === 'TODAY').length, 1);
+      assert.ok(!visible.svg.includes('TODAY →'));
+    }
+  }
+  for (const today of ['2026-09-11', '2026-10-10', undefined]) {
+    assert.ok(!renderWallpaper([], { ...options, today }).svg.includes('TODAY →'));
+  }
+});

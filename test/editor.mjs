@@ -417,3 +417,20 @@ test('local calendar selection and individual exclusions survive refresh, moves 
   assert.equal(snapshot().events.length, 0);
   dom.window.close();
 });
+
+test('event style defaults to text, switches rendering and survives reload', async () => {
+  const { dom, w, seed, snapshot } = await setup();
+  const original = snapshot();
+  assert.equal(original.editor.eventStyle, 'text');
+  w.nativeUpdate({ eventStyle: 'boxes' });
+  const boxed = snapshot();
+  assert.equal(boxed.editor.eventStyle, 'boxes');
+  assert.notEqual(boxed.svg, original.svg);
+  w.nativeLoad({ ...seed, editor: boxed.editor });
+  assert.equal(snapshot().svg, boxed.svg);
+  assert.throws(() => w.nativeUpdate({ eventStyle: 'invalid' }));
+  assert.equal(snapshot().editor.eventStyle, 'boxes');
+  w.nativeUpdate({ eventStyle: 'text' });
+  assert.equal(snapshot().svg, original.svg);
+  dom.window.close();
+});

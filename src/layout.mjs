@@ -32,6 +32,32 @@ function calendarColor(value, theme) {
   if (Object.hasOwn(eventColors, value)) return eventColors[value][theme === 'dark' ? 1 : 0];
   return /^#[0-9a-f]{6}$/i.test(value || '') ? value : null;
 }
+// Lighten or darken calendar colors without introducing the wallpaper background hue.
+function boxColor(color, theme) {
+  const base = theme === 'dark' ? 0 : 255;
+  return (
+    '#' +
+    [1, 3, 5]
+      .map((offset) => {
+        const foreground = parseInt(color.slice(offset, offset + 2), 16);
+        return Math.round(base * 0.3 + foreground * 0.7)
+          .toString(16)
+          .padStart(2, '0');
+      })
+      .join('')
+  );
+}
+function boxTextColor(fill) {
+  const channels = fill
+    .slice(1)
+    .match(/../g)
+    .map((hex) => {
+      const value = parseInt(hex, 16) / 255;
+      return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    });
+  const luminance = channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  return luminance > 0.179 ? '#000000' : '#ffffff';
+}
 export function resolveTheme(theme, systemTheme = 'light') {
   const resolved = theme === 'system' ? systemTheme : theme;
   return resolved === 'dark' ? 'dark' : 'light';
@@ -229,6 +255,8 @@ export function renderWallpaper(events, options) {
     height > 4320
   )
     throw new Error('Use an image between 1280 × 720 and 7680 × 4320 pixels.');
+  const boxed = options.eventStyle === 'boxes';
+  const bottomPadding = boxed ? 4 : 0;
   const grid = buildGrid(events, options);
   const p = palettes[resolveTheme(options.theme, options.systemTheme)];
   const W = 1512,
@@ -295,20 +323,23 @@ export function renderWallpaper(events, options) {
         ? event.startTime
         : `${day === event.date ? event.startTime : '↳'} – ${day === event.endDate ? event.endTime : 'continues'}`;
   const cardInfo = (event, day, maxLines = 20) => {
-    const wrapped = wrapText(event.title, cw - 28, titleSize, maxLines);
+    const textInset = boxed && event.kind === 'presentation' ? 7 : 0;
+    const contentWidth = cw - 28 - textInset;
+    const wrapped = wrapText(event.title, contentWidth, titleSize, maxLines);
     const roomText =
       options.rooms !== false && event.room ? event.room + (event.roomConflict ? ' *' : '') : '';
-    const room = wrapText(roomText, cw - 28, 10.5, 1);
+    const room = wrapText(roomText, contentWidth, 10.5, 1);
     const time = timeLabel(event, day);
     const stackedRoom = Boolean(
-      roomText && textWidth(time, 11) + textWidth(room.lines[0], 10.5) + 16 > cw - 28,
+      roomText && textWidth(time, 11) + textWidth(room.lines[0], 10.5) + 16 > contentWidth,
     );
     return {
       ...wrapped,
       room,
       time,
       stackedRoom,
-      height: 16 + wrapped.lines.length * lineHeight + (stackedRoom ? 14 : 0) + 4,
+      textInset,
+      height: 16 + wrapped.lines.length * lineHeight + (stackedRoom ? 14 : 0) + 4 + bottomPadding,
     };
   };
   const needed = grid.rows.map((row) =>
@@ -441,25 +472,65 @@ export function renderWallpaper(events, options) {
           event.sourceColor,
           resolveTheme(options.theme, options.systemTheme),
         );
-        if (event.kind === 'presentation')
-          rect(dx + 4, cy - 11, 3, card.height - 10, eventColor || p.accent, 1);
-        text(dx + 12, cy, card.time, 11, eventColor || p.accent, 500);
+        const boxFill = boxColor(
+          eventColor || p.accent,
+          resolveTheme(options.theme, options.systemTheme),
+        );
+        const neutralText = boxed
+          ? resolveTheme(options.theme, options.systemTheme) === 'light'
+            ? palettes.dark.text
+            : boxTextColor(boxFill)
+          : null;
+        if (boxed) rect(dx + 4, cy - 13, cw - 8, card.height - 5, boxFill, 5);
+        if (!boxed && event.kind === 'presentation')
+          rect(dx + 4, cy - 11, 3, card.height - 10, neutralText || eventColor || p.accent, 1);
+        if (boxed && event.kind === 'presentation')
+          rect(dx + 9, cy - 8, 3, card.height - 15, neutralText, 1);
+        text(
+          dx + 12 + card.textInset,
+          cy,
+          card.time,
+          11,
+          neutralText || eventColor || p.accent,
+          500,
+        );
         if (card.room.lines.length) {
           if (card.stackedRoom) {
             cy += 14;
-            text(dx + 12, cy, card.room.lines[0], 10.5, p.muted);
-          } else text(dx + cw - 16, cy, card.room.lines[0], 10.5, p.muted, 400, 'end');
+            text(dx + 12 + card.textInset, cy, card.room.lines[0], 10.5, neutralText || p.muted);
+          } else
+            text(dx + cw - 16, cy, card.room.lines[0], 10.5, neutralText || p.muted, 400, 'end');
           if (card.room.truncated) warnings.push(`${day.key}: full location is in the preview.`);
         }
         cy += 16;
         card.lines.forEach((t) => {
-          text(dx + 12, cy, t, titleSize, eventColor || p.text, 500);
+          text(
+            dx + 12 + card.textInset,
+            cy,
+            t,
+            titleSize,
+            neutralText || eventColor || p.text,
+            500,
+          );
           cy += lineHeight;
         });
-        cy += 4;
+        cy += 4 + bottomPadding;
         if (card.truncated) warnings.push(`${day.key}: full session title is in the preview.`);
       }
     });
+    if (
+      grid.columns === 5 &&
+      (options.today === dayAdd(row[0].key, 5) || options.today === dayAdd(row[0].key, 6))
+    ) {
+      const dayName = weekday(options.today) === 5 ? 'Sat' : 'Sun';
+      const label = `TODAY → ${dayName} ${fmt(options.today)}`;
+      const badgeWidth = textWidth(label, 9) + 16;
+      const badgeRight = W - right - 8;
+      chunks.push('<g><title>Today is off-screen because weekends are hidden.</title>');
+      rect(badgeRight - badgeWidth, rowY + 6, badgeWidth, 19, p.tint, 5);
+      text(badgeRight - 8, rowY + 19, label, 9, p.accent, 600, 'end');
+      chunks.push('</g>');
+    }
     rowY += rh;
   });
   line(x, rowY, W - right, rowY);

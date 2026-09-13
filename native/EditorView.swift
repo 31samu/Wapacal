@@ -26,6 +26,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     let details = NSTextView()
     let mode = NSPopUpButton()
     let theme = NSPopUpButton()
+    let eventStyle = NSPopUpButton()
     let resolution = NSPopUpButton()
     private var customSizeAlert: NSAlert?
     private let customWidth = NSTextField()
@@ -125,7 +126,8 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         view = NSView()
         mode.addItems(withTitles: ["Module", "Month"])
         theme.addItems(withTitles: ["System", "Light", "Dark"])
-        for control in [mode, theme, resolution, course] {
+        eventStyle.addItems(withTitles: ["Text", "Boxes"])
+        for control in [mode, theme, eventStyle, resolution, course] {
             control.target = self
             control.action = #selector(changeControl(_:))
         }
@@ -165,6 +167,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         appearanceFields = Self.stack(
             [
                 field("Preview appearance", theme),
+                field("Event style", eventStyle),
                 field(
                     "Image size",
                     Self.stack([resolution, displayResolution, displaySizes], spacing: 6)),
@@ -321,7 +324,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
 
     func setReady(_ ready: Bool) {
         for control: NSControl in [
-            mode, theme, resolution, course, name, start, end, month, showTitle, rooms,
+            mode, theme, eventStyle, resolution, course, name, start, end, month, showTitle, rooms,
             includeWeekends, iconSpace, exportMenu,
         ] { control.isEnabled = ready }
     }
@@ -337,6 +340,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         editor = snapshot["editor"] as? [String: Any] ?? [:]
         events = snapshot["events"] as? [[String: Any]] ?? []
         mode.selectItem(at: editor["mode"] as? String == "month" ? 1 : 0)
+        eventStyle.selectItem(at: editor["eventStyle"] as? String == "boxes" ? 1 : 0)
         theme.selectItem(
             at: ["system": 0, "light": 1, "dark": 2][editor["theme"] as? String ?? "system"] ?? 0)
         // Keep text being edited intact when a background refresh arrives.
@@ -440,6 +444,8 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         var patch: [String: Any] = [:]
         switch sender {
         case mode: patch["mode"] = mode.indexOfSelectedItem == 1 ? "month" : "module"
+        case eventStyle:
+            patch["eventStyle"] = eventStyle.indexOfSelectedItem == 1 ? "boxes" : "text"
         case theme:
             switch theme.indexOfSelectedItem {
             case 1: patch["theme"] = "light"

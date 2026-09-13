@@ -270,6 +270,13 @@
             <option value="dark">Dark</option>
           </select>
         </div>
+        <div class="field">
+          <label for="event-style">Event style</label>
+          <select id="event-style">
+            <option value="text">Text</option>
+            <option value="boxes">Boxes</option>
+          </select>
+        </div>
         <div id="module-fields">
           <div class="field">
             <label for="module-name">Module name</label><input id="module-name" maxlength="120" />
@@ -352,6 +359,7 @@
       const state = {
         mode: 'module',
         theme: 'system',
+        eventStyle: 'text',
         month: data.today.slice(0, 7),
         name: config.module.name,
         start: config.module.start,
@@ -590,6 +598,7 @@
       const binds = [
         ['mode', 'mode'],
         ['theme', 'theme'],
+        ['event-style', 'eventStyle'],
         ['month', 'month'],
         ['module-name', 'name'],
         ['start', 'start'],
