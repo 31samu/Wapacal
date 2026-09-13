@@ -5,6 +5,8 @@ const nativeDefaults = (() => {
   return {
     mode: 'module',
     theme: 'system',
+    colorTheme: 'forest',
+    calendarColors: true,
     eventStyle: 'text',
     month: today.slice(0, 7),
     ...config.module,
@@ -92,6 +94,9 @@ window.nativeUpdate = function (patch) {
   const editable = [
     'mode',
     'theme',
+    'colorTheme',
+    'customColors',
+    'calendarColors',
     'eventStyle',
     'month',
     'name',
@@ -195,6 +200,8 @@ window.nativeSnapshot = function () {
   return {
     revision,
     editor: { ...state, excludedEventIds: [...state.excludedEventIds] },
+    colorThemes: Object.entries(colorThemes).map(([id, theme]) => ({ id, name: theme.name })),
+    customColors: customThemeColors(state),
     courseCode,
     events: candidates.map((event) => ({
       ...event,

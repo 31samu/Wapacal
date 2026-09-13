@@ -434,3 +434,68 @@ test('event style defaults to text, switches rendering and survives reload', asy
   assert.equal(snapshot().svg, original.svg);
   dom.window.close();
 });
+
+test('color themes render in both appearances and custom colors survive reload', async () => {
+  const { dom, w, seed, snapshot } = await setup();
+  w.nativeUpdate({ mode: 'month', month: '2026-10', course: '' });
+  w.nativeSources(
+    [
+      {
+        id: 'colored',
+        name: 'Colored calendar',
+        color: '#ff0000',
+        ics: calendar(session('colored', 'Colored event', '20261005')),
+      },
+    ],
+    false,
+  );
+  for (const colorTheme of ['forest', 'neutral', 'ocean', 'plum', 'rose', 'sand']) {
+    for (const theme of ['light', 'dark']) {
+      w.nativeUpdate({ colorTheme, theme, eventStyle: 'boxes', calendarColors: false });
+      const current = snapshot();
+      assert.ok(current.svg.includes('<svg'));
+      if (colorTheme === 'neutral') {
+        for (const [, hex] of current.svg.matchAll(/(?:fill|stroke)="(#[0-9a-f]{6})"/gi)) {
+          assert.equal(hex.slice(1, 3), hex.slice(3, 5));
+          assert.equal(hex.slice(3, 5), hex.slice(5, 7));
+        }
+      }
+      for (const eventStyle of ['text', 'boxes']) {
+        w.nativeUpdate({ calendarColors: true, eventStyle });
+        assert.match(snapshot().svg, /fill="#ff0000"[^>]*>Colored calendar<\/text>/);
+        if (eventStyle === 'text') {
+          assert.match(snapshot().svg, /fill="#ff0000"[^>]*>Colored event<\/text>/);
+        } else {
+          assert.ok(snapshot().svg.includes(theme === 'light' ? '#ff4d4d' : '#b30000'));
+        }
+      }
+    }
+  }
+  const customColors = {
+    light: { bg: '#fafafa', text: '#222222', accent: '#995511' },
+    dark: { bg: '#111111', text: '#eeeeee', accent: '#eeaa55' },
+  };
+  w.nativeUpdate({ colorTheme: 'custom', customColors, calendarColors: false });
+  const saved = snapshot().editor;
+  w.nativeLoad({ ...seed, editor: saved });
+  assert.deepEqual(snapshot().editor.customColors, customColors);
+  for (const theme of ['light', 'dark']) {
+    w.nativeUpdate({ theme });
+    assert.ok(snapshot().svg.includes(`fill="${customColors[theme].bg}"`));
+  }
+  w.nativeUpdate({ colorTheme: 'ocean' });
+  w.nativeUpdate({ colorTheme: 'custom' });
+  assert.deepEqual(snapshot().editor.customColors, customColors);
+  const before = snapshot();
+  for (const patch of [
+    { colorTheme: 'unknown' },
+    { calendarColors: 'yes' },
+    { customColors: null },
+    { customColors: { light: { bg: 'red' } } },
+    { customColors: { ...customColors, dark: { ...customColors.dark, accent: '#fff\"/>' } } },
+  ]) {
+    assert.throws(() => w.nativeUpdate(patch));
+    assert.deepEqual(snapshot(), before);
+  }
+  dom.window.close();
+});

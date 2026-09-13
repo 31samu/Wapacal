@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM, VirtualConsole } from 'jsdom';
 import sharp from 'sharp';
-import { renderWallpaper, selectEvents, palettes } from '../src/layout.mjs';
+import { renderWallpaper, selectEvents, palettes, colorThemes } from '../src/layout.mjs';
 import { loadFixtureApp } from './helpers/fixture-app.mjs';
 
 test('sanitized fixture fits the initial module in both appearances', async () => {
@@ -256,50 +256,81 @@ test('browser preview expands subscriptions when navigating to a distant month',
 test('boxes lighten or darken calendar colors and use the requested theme text colors', async () => {
   const { data, config } = await loadFixtureApp();
   for (const theme of ['light', 'dark']) {
-    for (const color of ['#ffffff', '#000000', '#123abc']) {
-      const events = data.events.map((event) => ({ ...event, sourceColor: color }));
-      const options = { ...config, ...config.module, mode: 'module', theme };
-      const plain = renderWallpaper(events, options);
-      const boxed = renderWallpaper(events, { ...options, eventStyle: 'boxes' });
-      assert.deepEqual(
-        boxed.placements.map(({ uid, date }) => ({ uid, date })),
-        plain.placements.map(({ uid, date }) => ({ uid, date })),
-      );
-      assert.deepEqual(boxed.warnings, plain.warnings);
-      const doc = new JSDOM(boxed.svg, { contentType: 'image/svg+xml' }).window.document;
-      const boxes = [...doc.querySelectorAll('rect')].filter(
-        (rect) =>
-          rect.getAttribute('rx') === '5' && rect.getAttribute('fill') !== palettes[theme].tint,
-      );
-      assert.equal(boxes.length, boxed.placements.length);
-      for (const box of boxes) {
-        const fill = box.getAttribute('fill');
-        for (const offset of [1, 3, 5]) {
-          const original = parseInt(color.slice(offset, offset + 2), 16);
-          const neutral = theme === 'dark' ? 0 : 255;
-          const softened = parseInt(fill.slice(offset, offset + 2), 16);
-          assert.equal(softened, Math.round(original * 0.7 + neutral * 0.3));
+    for (const colorTheme of [...Object.keys(colorThemes), 'custom']) {
+      for (const color of ['#ffffff', '#000000', '#123abc']) {
+        const events = data.events.map((event) => ({ ...event, sourceColor: color }));
+        const options = { ...config, ...config.module, mode: 'module', theme, colorTheme };
+        const plain = renderWallpaper(events, options);
+        const boxed = renderWallpaper(events, { ...options, eventStyle: 'boxes' });
+        assert.deepEqual(
+          boxed.placements.map(({ uid, date }) => ({ uid, date })),
+          plain.placements.map(({ uid, date }) => ({ uid, date })),
+        );
+        assert.deepEqual(boxed.warnings, plain.warnings);
+        const doc = new JSDOM(boxed.svg, { contentType: 'image/svg+xml' }).window.document;
+        const boxes = [...doc.querySelectorAll('rect')].filter(
+          (rect) =>
+            rect.getAttribute('rx') === '5' && rect.getAttribute('fill') !== palettes[theme].tint,
+        );
+        assert.equal(boxes.length, boxed.placements.length);
+        for (const box of boxes) {
+          const fill = box.getAttribute('fill');
+          for (const offset of [1, 3, 5]) {
+            const original = parseInt(color.slice(offset, offset + 2), 16);
+            const neutral = theme === 'dark' ? 0 : 255;
+            const softened = parseInt(fill.slice(offset, offset + 2), 16);
+            assert.equal(softened, Math.round(original * 0.7 + neutral * 0.3));
+          }
+          const next = box.nextElementSibling;
+          const text = next.tagName === 'text' ? next : next.nextElementSibling;
+          if (theme === 'light') {
+            assert.equal(
+              text.getAttribute('fill'),
+              colorThemes[colorTheme]?.dark.text ?? palettes.dark.text,
+            );
+            continue;
+          }
+          const channels = fill
+            .slice(1)
+            .match(/../g)
+            .map((hex) => {
+              const value = parseInt(hex, 16) / 255;
+              return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+            });
+          const luminance = channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+          const contrast =
+            text.getAttribute('fill') === '#000000'
+              ? (luminance + 0.05) / 0.05
+              : 1.05 / (luminance + 0.05);
+          assert.ok(contrast >= 4.5, 'Dark-theme box text remains readable on custom colors');
         }
-        const next = box.nextElementSibling;
-        const text = next.tagName === 'text' ? next : next.nextElementSibling;
-        if (theme === 'light') {
-          assert.equal(text.getAttribute('fill'), palettes.dark.text);
-          continue;
-        }
-        const channels = fill
-          .slice(1)
-          .match(/../g)
-          .map((hex) => {
-            const value = parseInt(hex, 16) / 255;
-            return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
-          });
-        const luminance = channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
-        const contrast =
-          text.getAttribute('fill') === '#000000'
-            ? (luminance + 0.05) / 0.05
-            : 1.05 / (luminance + 0.05);
-        assert.ok(contrast >= 4.5, 'Dark-theme box text remains readable on custom colors');
       }
     }
   }
+});
+
+test('preview color controls select presets and retain custom colors', async () => {
+  const { preview } = await loadFixtureApp();
+  const dom = new JSDOM(preview, { runScripts: 'dangerously' });
+  const el = (id) => dom.window.document.getElementById(id);
+  const change = (id, value) => {
+    el(id).value = value;
+    el(id).dispatchEvent(new dom.window.Event('input'));
+  };
+  change('color-theme', 'ocean');
+  assert.match(el('wallpaper').innerHTML, /#edf3f8/);
+  change('color-theme', 'custom');
+  assert.equal(el('custom-colors').hidden, false);
+  assert.equal(el('color-light-bg').value, '#edf3f8');
+  change('color-light-bg', '#abcdef');
+  assert.match(el('wallpaper').innerHTML, /#abcdef/);
+  change('color-theme', 'neutral');
+  assert.equal(el('calendar-colors-field').hidden, false);
+  assert.equal(el('custom-colors').hidden, true);
+  change('color-theme', 'custom');
+  assert.equal(el('color-light-bg').value, '#abcdef');
+  change('theme', 'dark');
+  change('color-dark-bg', '#121212');
+  assert.match(el('wallpaper').innerHTML, /#121212/);
+  dom.window.close();
 });

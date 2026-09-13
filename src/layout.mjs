@@ -20,6 +20,96 @@ export const palettes = {
     orange: '#e7b589',
   },
 };
+// Each color theme has a light and dark palette for adaptive wallpapers.
+export const colorThemes = {
+  forest: { name: 'Forest', light: palettes.light, dark: palettes.dark },
+  neutral: themePair(
+    'Neutral',
+    ['#f2f2f2', '#292929', '#555555'],
+    ['#202020', '#eeeeee', '#bbbbbb'],
+  ),
+  ocean: themePair('Ocean', ['#edf3f8', '#20354b', '#28658f'], ['#172532', '#e0edf7', '#95c9ee']),
+  plum: themePair('Plum', ['#f3eff7', '#403049', '#76538f'], ['#291f32', '#eee3f5', '#ceb0e5']),
+  rose: themePair('Rose', ['#f8efef', '#4b3035', '#9a4c62'], ['#321f26', '#f5e3e7', '#ecaabd']),
+  sand: themePair('Sand', ['#f6f1e7', '#473b29', '#876735'], ['#2c261c', '#f0e8d8', '#d9bf87']),
+};
+function mixColor(a, b, amount) {
+  return (
+    '#' +
+    [1, 3, 5]
+      .map((offset) =>
+        Math.round(
+          parseInt(a.slice(offset, offset + 2), 16) * (1 - amount) +
+            parseInt(b.slice(offset, offset + 2), 16) * amount,
+        )
+          .toString(16)
+          .padStart(2, '0'),
+      )
+      .join('')
+  );
+}
+function derivedPalette([bg, text, accent]) {
+  return {
+    bg,
+    text,
+    accent,
+    muted: mixColor(bg, text, 0.7),
+    line: mixColor(bg, text, 0.22),
+    tint: mixColor(bg, accent, 0.14),
+    faint: mixColor(bg, accent, 0.07),
+    orange: accent,
+  };
+}
+function themePair(name, light, dark) {
+  return { name, light: derivedPalette(light), dark: derivedPalette(dark) };
+}
+export function customThemeColors(options = {}) {
+  const preset = colorThemes[options.colorTheme] || colorThemes.forest;
+  return Object.fromEntries(
+    ['light', 'dark'].map((appearance) => [
+      appearance,
+      Object.fromEntries(
+        ['bg', 'text', 'accent'].map((key) => [
+          key,
+          options.customColors?.[appearance]?.[key] || preset[appearance][key],
+        ]),
+      ),
+    ]),
+  );
+}
+export function resolvePalette(options = {}) {
+  const name = options.colorTheme ?? 'forest';
+  if (name !== 'custom' && !Object.hasOwn(colorThemes, name))
+    throw new Error('Choose a valid color theme.');
+  if (options.calendarColors !== undefined && typeof options.calendarColors !== 'boolean')
+    throw new Error('Choose whether to use calendar colors.');
+  if (options.customColors !== undefined) {
+    const colors = options.customColors;
+    if (
+      !colors ||
+      typeof colors !== 'object' ||
+      Array.isArray(colors) ||
+      Object.keys(colors).some((key) => !['light', 'dark'].includes(key)) ||
+      ['light', 'dark'].some(
+        (appearance) =>
+          !colors[appearance] ||
+          Object.keys(colors[appearance]).some((key) => !['bg', 'text', 'accent'].includes(key)) ||
+          ['bg', 'text', 'accent'].some(
+            (key) =>
+              typeof colors[appearance][key] !== 'string' ||
+              !/^#[0-9a-f]{6}$/i.test(colors[appearance][key]),
+          ),
+      )
+    )
+      throw new Error(
+        'Choose valid background, text, and accent colors for light and dark appearance.',
+      );
+  }
+  const appearance = resolveTheme(options.theme, options.systemTheme);
+  return name === 'custom'
+    ? derivedPalette(Object.values(customThemeColors(options)[appearance]))
+    : colorThemes[name][appearance];
+}
 const eventColors = {
   green: ['#356e50', '#b3d3a7'],
   blue: ['#285e9b', '#9fc7ff'],
@@ -258,7 +348,11 @@ export function renderWallpaper(events, options) {
   const boxed = options.eventStyle === 'boxes';
   const bottomPadding = boxed ? 4 : 0;
   const grid = buildGrid(events, options);
-  const p = palettes[resolveTheme(options.theme, options.systemTheme)];
+  const p = resolvePalette(options);
+  const eventThemeColor = (value) =>
+    options.calendarColors === false
+      ? null
+      : calendarColor(value, resolveTheme(options.theme, options.systemTheme));
   const W = 1512,
     H = (height / width) * W;
   const menuBarInset = 24;
@@ -290,9 +384,7 @@ export function renderWallpaper(events, options) {
       label,
       x: legendX,
       row: legendRow,
-      color:
-        calendarColor(event.sourceColor, resolveTheme(options.theme, options.systemTheme)) ||
-        p.text,
+      color: eventThemeColor(event.sourceColor) || p.text,
     });
     legendX += labelWidth + 24;
   }
@@ -468,17 +560,14 @@ export function renderWallpaper(events, options) {
           rowTop: rowY,
           rowBottom: rowY + rh,
         });
-        const eventColor = calendarColor(
-          event.sourceColor,
-          resolveTheme(options.theme, options.systemTheme),
-        );
+        const eventColor = eventThemeColor(event.sourceColor);
         const boxFill = boxColor(
           eventColor || p.accent,
           resolveTheme(options.theme, options.systemTheme),
         );
         const neutralText = boxed
           ? resolveTheme(options.theme, options.systemTheme) === 'light'
-            ? palettes.dark.text
+            ? (colorThemes[options.colorTheme]?.dark.text ?? palettes.dark.text)
             : boxTextColor(boxFill)
           : null;
         if (boxed) rect(dx + 4, cy - 13, cw - 8, card.height - 5, boxFill, 5);

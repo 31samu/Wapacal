@@ -702,6 +702,32 @@ Task { @MainActor in
         try require(
             ui.exportMenu.menu!.items.count == 5, "all export appearances remain accessible")
 
+        try require(
+            ui.colorTheme.itemTitles == [
+                "Forest", "Neutral", "Ocean", "Plum", "Rose", "Sand", "Custom",
+            ], "color theme choices")
+        ui.colorTheme.selectItem(withTitle: "Custom")
+        ui.changeControl(ui.colorTheme)
+        let colorDeadline = Date().addingTimeInterval(15)
+        while ui.editor["colorTheme"] as? String != "custom" && Date() < colorDeadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try require(ui.editor["colorTheme"] as? String == "custom", "custom theme action")
+        let well = ui.colorWells["light.bg"]!
+        well.color = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)
+        _ = well.sendAction(well.action!, to: well.target)
+        let wellDeadline = Date().addingTimeInterval(15)
+        while (ui.editor["customColors"] as? [String: [String: String]])?["light"]?["bg"]
+            != "#ff0000" && Date() < wellDeadline
+        {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try require(
+            (ui.editor["customColors"] as? [String: [String: String]])?["light"]?["bg"]
+                == "#ff0000", "native color picker action")
+        ui.colorTheme.selectItem(withTitle: "Forest")
+        ui.changeControl(ui.colorTheme)
+
         // Drive target/action through real native controls.
         ui.theme.selectItem(at: 2)
         ui.changeControl(ui.theme)

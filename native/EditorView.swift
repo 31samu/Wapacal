@@ -1,7 +1,57 @@
 import AppKit
 
+private final class ThemeColorWell: NSColorWell {
+    override var color: NSColor {
+        didSet { needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let pill = NSBezierPath(
+            roundedRect: bounds, xRadius: bounds.height / 2, yRadius: bounds.height / 2)
+        color.setFill()
+        pill.fill()
+    }
+
+    override func drawFocusRingMask() {
+        NSBezierPath(
+            roundedRect: bounds, xRadius: bounds.height / 2, yRadius: bounds.height / 2
+        ).fill()
+    }
+
+    override var focusRingMaskBounds: NSRect { bounds }
+}
+
 private final class FlippedDocumentView: NSView {
     override var isFlipped: Bool { true }
+}
+
+private final class JoinedResolutionControls: NSStackView {
+    override func draw(_ dirtyRect: NSRect) {
+        let outline = NSBezierPath(
+            roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+        NSColor.quaternaryLabelColor.setFill()
+        outline.fill()
+        NSColor.separatorColor.setStroke()
+        outline.lineWidth = 0.5
+        outline.stroke()
+        if let button = arrangedSubviews.last, !button.isHidden {
+            NSColor.separatorColor.setFill()
+            NSRect(x: button.frame.minX, y: 4, width: 1, height: bounds.height - 8).fill()
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        needsDisplay = true
+    }
+}
+
+private final class OverflowScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        let documentHeight = documentView?.frame.height ?? 0
+        verticalScrollElasticity = documentHeight > contentView.bounds.height ? .allowed : .none
+        super.scrollWheel(with: event)
+    }
 }
 
 // Every view in this controller is AppKit. Calendar text is always plain text.
@@ -26,6 +76,12 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     let details = NSTextView()
     let mode = NSPopUpButton()
     let theme = NSPopUpButton()
+    let colorTheme = NSPopUpButton()
+    let calendarColors = NSButton(
+        checkboxWithTitle: "Use calendar colors", target: nil, action: nil)
+    private var customColorFields: NSStackView!
+    private(set) var colorWells: [String: NSColorWell] = [:]
+    private var customColors: [String: [String: String]] = [:]
     let eventStyle = NSPopUpButton()
     let resolution = NSPopUpButton()
     private var customSizeAlert: NSAlert?
@@ -108,8 +164,10 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         let document = FlippedDocumentView()
         document.addSubview(content)
         content.translatesAutoresizingMaskIntoConstraints = false
-        let scroll = NSScrollView()
+        let scroll = OverflowScrollView()
         scroll.hasVerticalScroller = true
+        scroll.verticalScrollElasticity = .none
+        scroll.horizontalScrollElasticity = .none
         scroll.drawsBackground = false
         scroll.documentView = document
         document.translatesAutoresizingMaskIntoConstraints = false
@@ -127,7 +185,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         mode.addItems(withTitles: ["Module", "Month"])
         theme.addItems(withTitles: ["System", "Light", "Dark"])
         eventStyle.addItems(withTitles: ["Text", "Boxes"])
-        for control in [mode, theme, eventStyle, resolution, course] {
+        for control in [mode, theme, colorTheme, eventStyle, resolution, course] {
             control.target = self
             control.action = #selector(changeControl(_:))
         }
@@ -141,7 +199,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             picker.target = self
             picker.action = #selector(changeControl(_:))
         }
-        for control in [showTitle, rooms, includeWeekends, iconSpace] {
+        for control in [showTitle, rooms, includeWeekends, iconSpace, calendarColors] {
             control.target = self
             control.action = #selector(changeControl(_:))
         }
@@ -164,18 +222,74 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         displaySizes.font = .systemFont(ofSize: 11)
         displaySizes.textColor = .secondaryLabelColor
         displaySizes.isHidden = true
+        let lightHeading = NSTextField(labelWithString: "Light")
+        let darkHeading = NSTextField(labelWithString: "Dark")
+        for heading in [lightHeading, darkHeading] {
+            heading.font = .systemFont(ofSize: 11, weight: .medium)
+            heading.textColor = .secondaryLabelColor
+        }
+        var colorRows: [[NSView]] = [[NSGridCell.emptyContentView, lightHeading, darkHeading]]
+        for (key, title) in [("bg", "Background"), ("text", "Text"), ("accent", "Accent")] {
+            let label = NSTextField(labelWithString: title)
+            label.font = .systemFont(ofSize: 12)
+            var row: [NSView] = [label]
+            for appearance in ["light", "dark"] {
+                let well = ThemeColorWell()
+                well.colorWellStyle = .minimal
+                well.controlSize = .small
+                well.isBordered = false
+                if #available(macOS 14.0, *) { well.supportsAlpha = false }
+                well.widthAnchor.constraint(equalToConstant: 32).isActive = true
+                well.heightAnchor.constraint(equalToConstant: 20).isActive = true
+                well.target = self
+                well.action = #selector(changeColor(_:))
+                well.setAccessibilityLabel("\(appearance.capitalized) \(title.lowercased()) color")
+                colorWells["\(appearance).\(key)"] = well
+                row.append(well)
+            }
+            colorRows.append(row)
+        }
+        let colorGrid = NSGridView(views: colorRows)
+        colorGrid.columnSpacing = 24
+        colorGrid.rowSpacing = 8
+        colorGrid.yPlacement = .center
+        colorGrid.column(at: 0).xPlacement = .leading
+        for index in 1...2 {
+            colorGrid.column(at: index).width = 32
+            colorGrid.column(at: index).xPlacement = .center
+        }
+        customColorFields = Self.stack([colorGrid])
+        colorGrid.widthAnchor.constraint(equalTo: customColorFields.widthAnchor).isActive = true
+        customColorFields.isHidden = true
+        for control: NSControl in [resolution, displayResolution] {
+            control.controlSize = .small
+            control.font = .systemFont(ofSize: NSFont.systemFontSize)
+            control.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
+        resolution.isBordered = false
+        displayResolution.isBordered = false
+        displayResolution.setButtonType(.momentaryChange)
+        displayResolution.contentTintColor = .labelColor
+        let resolutionRow = JoinedResolutionControls(views: [resolution, displayResolution])
+        resolutionRow.orientation = .horizontal
+        resolutionRow.alignment = .centerY
+        resolutionRow.distribution = .fillEqually
+        resolutionRow.spacing = 0
+        resolutionRow.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+        let imageSizeFields = Self.stack([resolutionRow, displaySizes], spacing: 6)
+        resolutionRow.widthAnchor.constraint(equalTo: imageSizeFields.widthAnchor).isActive = true
         appearanceFields = Self.stack(
             [
                 field("Preview appearance", theme),
+                field("Color theme", colorTheme),
+                customColorFields!, calendarColors,
                 field("Event style", eventStyle),
-                field(
-                    "Image size",
-                    Self.stack([resolution, displayResolution, displaySizes], spacing: 6)),
+                field("Image size", imageSizeFields),
                 showTitle,
                 rooms, iconSpace,
             ], spacing: 14)
         appearanceFields.isHidden = true
-        displaySizes.widthAnchor.constraint(equalTo: resolution.widthAnchor).isActive = true
+        displaySizes.widthAnchor.constraint(equalTo: resolutionRow.widthAnchor).isActive = true
         appearanceToggle.setButtonType(.onOff)
         appearanceToggle.isBordered = false
         appearanceToggle.image = NSImage(
@@ -206,7 +320,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             }
         }
         let sidebar = scroll(settings)
-        sidebar.widthAnchor.constraint(equalToConstant: 255).isActive = true
+        sidebar.widthAnchor.constraint(equalToConstant: 270).isActive = true
 
         preview.imageScaling = .scaleProportionallyUpOrDown
         preview.setAccessibilityLabel(
@@ -317,16 +431,18 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             body.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             sidebar.heightAnchor.constraint(equalTo: body.heightAnchor),
             main.heightAnchor.constraint(equalTo: body.heightAnchor),
-            main.widthAnchor.constraint(equalTo: body.widthAnchor, constant: -271),
+            main.widthAnchor.constraint(equalTo: body.widthAnchor, constant: -286),
         ])
         setReady(false)
     }
 
     func setReady(_ ready: Bool) {
         for control: NSControl in [
-            mode, theme, eventStyle, resolution, course, name, start, end, month, showTitle, rooms,
+            mode, theme, colorTheme, calendarColors, eventStyle, resolution, course, name, start,
+            end, month, showTitle, rooms,
             includeWeekends, iconSpace, exportMenu,
         ] { control.isEnabled = ready }
+        for well in colorWells.values { well.isEnabled = ready }
     }
     func showError(_ message: String) {
         error.stringValue = message
@@ -343,6 +459,30 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         eventStyle.selectItem(at: editor["eventStyle"] as? String == "boxes" ? 1 : 0)
         theme.selectItem(
             at: ["system": 0, "light": 1, "dark": 2][editor["theme"] as? String ?? "system"] ?? 0)
+        colorTheme.removeAllItems()
+        for preset in snapshot["colorThemes"] as? [[String: String]] ?? [] {
+            colorTheme.addItem(withTitle: preset["name"] ?? "")
+            colorTheme.lastItem?.representedObject = preset["id"]
+        }
+        colorTheme.addItem(withTitle: "Custom")
+        colorTheme.lastItem?.representedObject = "custom"
+        let selectedTheme = editor["colorTheme"] as? String ?? "forest"
+        colorTheme.select(
+            colorTheme.itemArray.first { $0.representedObject as? String == selectedTheme })
+        customColorFields.isHidden = selectedTheme != "custom"
+        calendarColors.state = editor["calendarColors"] as? Bool == false ? .off : .on
+        customColors = snapshot["customColors"] as? [String: [String: String]] ?? [:]
+        for (id, well) in colorWells {
+            let parts = id.components(separatedBy: ".")
+            if let hex = customColors[parts[0]]?[parts[1]],
+                let rgb = UInt32(hex.dropFirst(), radix: 16)
+            {
+                well.color = NSColor(
+                    srgbRed: CGFloat((rgb >> 16) & 255) / 255,
+                    green: CGFloat((rgb >> 8) & 255) / 255, blue: CGFloat(rgb & 255) / 255, alpha: 1
+                )
+            }
+        }
         // Keep text being edited intact when a background refresh arrives.
         if name.currentEditor() == nil { name.stringValue = editor["name"] as? String ?? "" }
         for (picker, key) in [(start, "start"), (end, "end"), (month, "month")] {
@@ -440,6 +580,17 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         alert.buttons.first?.isEnabled =
             (1280...7680).contains(width) && (720...4320).contains(height)
     }
+    @objc func changeColor(_ sender: NSColorWell) {
+        guard let id = colorWells.first(where: { $0.value === sender })?.key,
+            let color = sender.color.usingColorSpace(.sRGB)
+        else { return }
+        let parts = id.components(separatedBy: ".")
+        customColors[parts[0]]?[parts[1]] = String(
+            format: "#%02x%02x%02x",
+            Int((color.redComponent * 255).rounded()), Int((color.greenComponent * 255).rounded()),
+            Int((color.blueComponent * 255).rounded()))
+        onChange?(["colorTheme": "custom", "customColors": customColors])
+    }
     @objc func changeControl(_ sender: NSControl) {
         var patch: [String: Any] = [:]
         switch sender {
@@ -452,6 +603,11 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             case 2: patch["theme"] = "dark"
             default: patch["theme"] = "system"
             }
+        case colorTheme:
+            let selected = colorTheme.selectedItem?.representedObject as? String ?? "forest"
+            patch["colorTheme"] = selected
+            if selected == "custom" { patch["customColors"] = customColors }
+        case calendarColors: patch["calendarColors"] = calendarColors.state == .on
         case course: patch["course"] = course.selectedItem?.representedObject as? String ?? ""
         case resolution:
             if resolution.titleOfSelectedItem == "Custom…" {
