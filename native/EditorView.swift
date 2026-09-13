@@ -74,15 +74,15 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     let error = NSTextField(wrappingLabelWithString: "")
     let table = NSTableView()
     let details = NSTextView()
-    let mode = NSPopUpButton()
-    let theme = NSPopUpButton()
+    let mode = NSSegmentedControl()
+    let theme = NSSegmentedControl()
     let colorTheme = NSPopUpButton()
     let calendarColors = NSButton(
         checkboxWithTitle: "Use calendar colors", target: nil, action: nil)
     private var customColorFields: NSStackView!
     private(set) var colorWells: [String: NSColorWell] = [:]
     private var customColors: [String: [String: String]] = [:]
-    let eventStyle = NSPopUpButton()
+    let eventStyle = NSSegmentedControl()
     let resolution = NSPopUpButton()
     private var customSizeAlert: NSAlert?
     private let customWidth = NSTextField()
@@ -104,6 +104,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     let appearanceToggle = NSButton(checkboxWithTitle: "Appearance", target: nil, action: nil)
     private(set) var appearanceFields: NSStackView!
     private var moduleFields: NSStackView!
+    private var courseField: NSStackView!
     private var monthField: NSStackView!
     private let suggestionList = NSStackView()
     private var suggestionSignature = ""
@@ -182,10 +183,19 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     }
     override func loadView() {
         view = NSView()
-        mode.addItems(withTitles: ["Module", "Month"])
-        theme.addItems(withTitles: ["System", "Light", "Dark"])
-        eventStyle.addItems(withTitles: ["Text", "Boxes"])
-        for control in [mode, theme, colorTheme, eventStyle, resolution, course] {
+        for (control, labels) in [
+            (mode, ["Module", "Month"]),
+            (theme, ["System", "Light", "Dark"]), (eventStyle, ["Text", "Boxes"]),
+        ] {
+            control.segmentCount = labels.count
+            control.trackingMode = .selectOne
+            control.segmentStyle = .rounded
+            control.segmentDistribution = .fillEqually
+            for (index, label) in labels.enumerated() {
+                control.setLabel(label, forSegment: index)
+            }
+        }
+        for control: NSControl in [mode, theme, colorTheme, eventStyle, resolution, course] {
             control.target = self
             control.action = #selector(changeControl(_:))
         }
@@ -203,9 +213,16 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             control.target = self
             control.action = #selector(changeControl(_:))
         }
-        moduleFields = Self.stack([
-            field("Module name", name), dateField("First day", start), dateField("Last day", end),
-        ])
+        for picker in [start, end] {
+            picker.controlSize = .small
+            picker.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        }
+        let dateRange = Self.stack(
+            [dateField("First day", start), dateField("Last day", end)],
+            vertical: false, spacing: 8)
+        dateRange.distribution = .fillEqually
+        moduleFields = Self.stack([field("Module name", name), dateRange])
+        courseField = field("Include", course)
         monthField = field("Month", month)
         exportMenu.addItem(withTitle: "Export")
         for (title, action) in [
@@ -278,11 +295,15 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         resolutionRow.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
         let imageSizeFields = Self.stack([resolutionRow, displaySizes], spacing: 6)
         resolutionRow.widthAnchor.constraint(equalTo: imageSizeFields.widthAnchor).isActive = true
+        let colorThemeRow = Self.stack([colorTheme, calendarColors], vertical: false, spacing: 6)
+        colorTheme.setAccessibilityLabel("Color theme")
+        calendarColors.setContentHuggingPriority(.required, for: .horizontal)
+        calendarColors.setContentCompressionResistancePriority(.required, for: .horizontal)
         appearanceFields = Self.stack(
             [
                 field("Preview appearance", theme),
-                field("Color theme", colorTheme),
-                customColorFields!, calendarColors,
+                field("Color theme", colorThemeRow),
+                customColorFields!,
                 field("Event style", eventStyle),
                 field("Image size", imageSizeFields),
                 showTitle,
@@ -308,7 +329,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         let settings = Self.stack(
             [
                 heading, field("View", mode), moduleFields, monthField,
-                field("Include", course), includeWeekends, separator, appearanceToggle,
+                courseField!, includeWeekends, separator, appearanceToggle,
                 appearanceFields!,
             ], spacing: 18)
         for child in settings.arrangedSubviews {
@@ -455,10 +476,10 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             ? events[table.selectedRow]["uid"] as? String : nil
         editor = snapshot["editor"] as? [String: Any] ?? [:]
         events = snapshot["events"] as? [[String: Any]] ?? []
-        mode.selectItem(at: editor["mode"] as? String == "month" ? 1 : 0)
-        eventStyle.selectItem(at: editor["eventStyle"] as? String == "boxes" ? 1 : 0)
-        theme.selectItem(
-            at: ["system": 0, "light": 1, "dark": 2][editor["theme"] as? String ?? "system"] ?? 0)
+        mode.selectedSegment = editor["mode"] as? String == "month" ? 1 : 0
+        eventStyle.selectedSegment = editor["eventStyle"] as? String == "boxes" ? 1 : 0
+        theme.selectedSegment =
+            ["system": 0, "light": 1, "dark": 2][editor["theme"] as? String ?? "system"] ?? 0
         colorTheme.removeAllItems()
         for preset in snapshot["colorThemes"] as? [[String: String]] ?? [] {
             colorTheme.addItem(withTitle: preset["name"] ?? "")
@@ -491,8 +512,8 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
                 picker.dateValue = date
             }
         }
-        moduleFields.isHidden = mode.indexOfSelectedItem != 0
-        monthField.isHidden = mode.indexOfSelectedItem != 1
+        moduleFields.isHidden = mode.selectedSegment != 0
+        monthField.isHidden = mode.selectedSegment != 1
         showTitle.state = editor["showTitle"] as? Bool == true ? .on : .off
         rooms.state = editor["rooms"] as? Bool == true ? .on : .off
         includeWeekends.state = editor["includeWeekends"] as? Bool == true ? .on : .off
@@ -510,6 +531,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             course.addItem(withTitle: "Course only · \(code)")
             course.lastItem?.representedObject = code
         }
+        courseField.isHidden = course.numberOfItems <= 1
         course.selectItem(
             at: course.itemArray.firstIndex(where: { $0.representedObject as? String == filter })
                 ?? 0)
@@ -594,11 +616,11 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     @objc func changeControl(_ sender: NSControl) {
         var patch: [String: Any] = [:]
         switch sender {
-        case mode: patch["mode"] = mode.indexOfSelectedItem == 1 ? "month" : "module"
+        case mode: patch["mode"] = mode.selectedSegment == 1 ? "month" : "module"
         case eventStyle:
-            patch["eventStyle"] = eventStyle.indexOfSelectedItem == 1 ? "boxes" : "text"
+            patch["eventStyle"] = eventStyle.selectedSegment == 1 ? "boxes" : "text"
         case theme:
-            switch theme.indexOfSelectedItem {
+            switch theme.selectedSegment {
             case 1: patch["theme"] = "light"
             case 2: patch["theme"] = "dark"
             default: patch["theme"] = "system"

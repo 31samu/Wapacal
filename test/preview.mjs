@@ -286,7 +286,9 @@ test('boxes lighten or darken calendar colors and use the requested theme text c
           if (theme === 'light') {
             assert.equal(
               text.getAttribute('fill'),
-              colorThemes[colorTheme]?.dark.text ?? palettes.dark.text,
+              colorTheme === 'custom'
+                ? colorThemes.neutral.light.text
+                : colorThemes[colorTheme].dark.text,
             );
             continue;
           }
@@ -321,7 +323,7 @@ test('preview color controls select presets and retain custom colors', async () 
   assert.match(el('wallpaper').innerHTML, /#edf3f8/);
   change('color-theme', 'custom');
   assert.equal(el('custom-colors').hidden, false);
-  assert.equal(el('color-light-bg').value, '#edf3f8');
+  assert.equal(el('color-light-bg').value, colorThemes.neutral.light.bg);
   change('color-light-bg', '#abcdef');
   assert.match(el('wallpaper').innerHTML, /#abcdef/);
   change('color-theme', 'neutral');

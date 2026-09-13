@@ -698,7 +698,10 @@ Task { @MainActor in
         try require(ui.appearanceFields.isHidden, "appearance starts collapsed")
         ui.appearanceToggle.performClick(nil)
         try require(!ui.appearanceFields.isHidden, "appearance disclosure opens")
-        try require(ui.theme.itemTitles == ["System", "Light", "Dark"], "appearance choices")
+        try require(
+            (0..<ui.theme.segmentCount).map { ui.theme.label(forSegment: $0) } == [
+                "System", "Light", "Dark",
+            ], "appearance choices")
         try require(
             ui.exportMenu.menu!.items.count == 5, "all export appearances remain accessible")
 
@@ -729,7 +732,21 @@ Task { @MainActor in
         ui.changeControl(ui.colorTheme)
 
         // Drive target/action through real native controls.
-        ui.theme.selectItem(at: 2)
+        try require(
+            (0..<ui.eventStyle.segmentCount).map { ui.eventStyle.label(forSegment: $0) } == [
+                "Text", "Boxes",
+            ],
+            "event style choices")
+        for (segment, style) in [(1, "boxes"), (0, "text")] {
+            ui.eventStyle.selectedSegment = segment
+            _ = ui.eventStyle.sendAction(ui.eventStyle.action!, to: ui.eventStyle.target)
+            let styleDeadline = Date().addingTimeInterval(15)
+            while ui.editor["eventStyle"] as? String != style && Date() < styleDeadline {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            try require(ui.editor["eventStyle"] as? String == style, "event style segment action")
+        }
+        ui.theme.selectedSegment = 2
         ui.changeControl(ui.theme)
         let darkDeadline = Date().addingTimeInterval(15)
         while ui.editor["theme"] as? String != "dark" && Date() < darkDeadline {

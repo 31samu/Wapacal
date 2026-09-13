@@ -499,3 +499,27 @@ test('color themes render in both appearances and custom colors survive reload',
   }
   dom.window.close();
 });
+
+test('unconfigured custom colors default to neutral and light boxes respect custom text', async () => {
+  const { dom, w, snapshot } = await setup();
+  for (const colorTheme of ['forest', 'ocean', 'custom']) {
+    w.nativeUpdate({ colorTheme });
+    assert.deepEqual(snapshot().customColors, {
+      light: { bg: '#f2f2f2', text: '#292929', accent: '#555555' },
+      dark: { bg: '#202020', text: '#eeeeee', accent: '#bbbbbb' },
+    });
+  }
+  const customColors = snapshot().customColors;
+  customColors.light.text = '#123456';
+  w.nativeUpdate({ colorTheme: 'custom', theme: 'light', eventStyle: 'boxes', customColors });
+  const current = snapshot();
+  const doc = new JSDOM(current.svg, { contentType: 'image/svg+xml' }).window.document;
+  const boxes = [...doc.querySelectorAll('rect')].filter((rect) => rect.getAttribute('rx') === '5');
+  assert.ok(boxes.length > 0);
+  for (const box of boxes) {
+    let next = box.nextElementSibling;
+    if (next.tagName !== 'text') next = next.nextElementSibling;
+    assert.equal(next.getAttribute('fill'), '#123456');
+  }
+  dom.window.close();
+});

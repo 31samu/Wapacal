@@ -64,7 +64,7 @@ function themePair(name, light, dark) {
   return { name, light: derivedPalette(light), dark: derivedPalette(dark) };
 }
 export function customThemeColors(options = {}) {
-  const preset = colorThemes[options.colorTheme] || colorThemes.forest;
+  const preset = colorThemes.neutral;
   return Object.fromEntries(
     ['light', 'dark'].map((appearance) => [
       appearance,
@@ -567,7 +567,9 @@ export function renderWallpaper(events, options) {
         );
         const neutralText = boxed
           ? resolveTheme(options.theme, options.systemTheme) === 'light'
-            ? (colorThemes[options.colorTheme]?.dark.text ?? palettes.dark.text)
+            ? options.colorTheme === 'custom'
+              ? p.text
+              : (colorThemes[options.colorTheme]?.dark.text ?? palettes.dark.text)
             : boxTextColor(boxFill)
           : null;
         if (boxed) rect(dx + 4, cy - 13, cw - 8, card.height - 5, boxFill, 5);
