@@ -759,12 +759,14 @@ Task { @MainActor in
         for size in [originalContentSize, NSSize(width: 1060, height: 588), originalContentSize] {
             editorApp.window.setContentSize(size)
             editorApp.window.contentView?.layoutSubtreeIfNeeded()
-            let tableScroll = ui.table.enclosingScrollView!
-            let split = tableScroll.superview as! NSSplitView
-            let content = ui.tabs.selectedTabViewItem!.view!
-            let instruction = content.subviews.compactMap { $0 as? NSTextField }.first!
+            guard let tableScroll = ui.table.enclosingScrollView,
+                let split = tableScroll.superview as? NSSplitView,
+                let content = ui.tabs.selectedTabViewItem?.view
+            else {
+                throw WallpaperError.invalid("Native UI test failed: event split hierarchy missing")
+            }
             let diagnostic =
-                "window=\(editorApp.window.contentView!.frame), split=\(split.frame), content=\(content.bounds), instruction=\(instruction.frame)"
+                "window=\(editorApp.window.contentView!.frame), split=\(split.frame), content=\(content.bounds)"
             try require(
                 abs(split.frame.minX - content.bounds.minX) <= 1
                     && abs(split.frame.width - content.bounds.width) <= 1
@@ -772,8 +774,11 @@ Task { @MainActor in
                 "event table and split fill the available width: \(diagnostic)")
             try require(
                 abs(split.frame.minY - content.bounds.minY) <= 1
-                    && abs(split.frame.maxY - (instruction.frame.minY - 10)) <= 1,
-                "event split fills the space below the instruction: \(diagnostic)")
+                    && abs(split.frame.maxY - content.bounds.maxY) <= 1,
+                "event split fills the available height: \(diagnostic)")
+            try require(
+                split.arrangedSubviews.count == 2,
+                "event split contains the table and details: \(diagnostic)")
             try require(
                 tableScroll.frame.height >= 110
                     && split.arrangedSubviews[1].frame.height >= 100,
