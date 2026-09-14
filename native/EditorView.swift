@@ -1,5 +1,40 @@
 import AppKit
 
+func colorMenuDot(hex: String?) -> NSImage {
+    NSImage(size: NSSize(width: 16, height: 16), flipped: false) { _ in
+        let dot = NSBezierPath(ovalIn: NSRect(x: 3, y: 3, width: 10, height: 10))
+        if let hex, let rgb = UInt32(hex.dropFirst(), radix: 16) {
+            NSColor(
+                srgbRed: CGFloat((rgb >> 16) & 255) / 255,
+                green: CGFloat((rgb >> 8) & 255) / 255,
+                blue: CGFloat(rgb & 255) / 255, alpha: 1
+            ).setFill()
+            dot.fill()
+        } else {
+            let colors: [NSColor] = [
+                .systemRed, .systemOrange, .systemYellow, .systemGreen,
+                .systemBlue, .systemPurple,
+            ]
+            let center = NSPoint(x: 8, y: 8)
+            for (index, color) in colors.enumerated() {
+                let wedge = NSBezierPath()
+                wedge.move(to: center)
+                wedge.appendArc(
+                    withCenter: center, radius: 5,
+                    startAngle: CGFloat(index) * 60 + 90,
+                    endAngle: CGFloat(index + 1) * 60 + 90)
+                wedge.close()
+                color.setFill()
+                wedge.fill()
+            }
+        }
+        NSColor.labelColor.withAlphaComponent(0.25).setStroke()
+        dot.lineWidth = 0.5
+        dot.stroke()
+        return true
+    }
+}
+
 private final class ThemeColorWell: NSColorWell {
     override var color: NSColor {
         didSet { needsDisplay = true }
@@ -46,6 +81,10 @@ private final class JoinedResolutionControls: NSStackView {
     }
 }
 
+private final class PersistentScroller: NSScroller {
+    override class var isCompatibleWithOverlayScrollers: Bool { false }
+}
+
 private final class OverflowScrollView: NSScrollView {
     override func scrollWheel(with event: NSEvent) {
         let documentHeight = documentView?.frame.height ?? 0
@@ -89,13 +128,12 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     private let customHeight = NSTextField()
     let displayResolution = NSButton(title: "Use display resolution", target: nil, action: nil)
     let displaySizes = NSTextField(wrappingLabelWithString: "")
-    let course = NSPopUpButton()
     let name = NSTextField()
     let start = NSDatePicker()
     let end = NSDatePicker()
     let month = NSDatePicker()
     let showTitle = NSButton(checkboxWithTitle: "Show title", target: nil, action: nil)
-    let rooms = NSButton(checkboxWithTitle: "Show rooms", target: nil, action: nil)
+    let rooms = NSButton(checkboxWithTitle: "Show locations", target: nil, action: nil)
     let includeWeekends = NSButton(
         checkboxWithTitle: "Include Saturdays and Sundays", target: nil, action: nil)
     let iconSpace = NSButton(
@@ -104,7 +142,6 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     let appearanceToggle = NSButton(checkboxWithTitle: "Appearance", target: nil, action: nil)
     private(set) var appearanceFields: NSStackView!
     private var moduleFields: NSStackView!
-    private var courseField: NSStackView!
     private var monthField: NSStackView!
     private let suggestionList = NSStackView()
     private var suggestionSignature = ""
@@ -166,6 +203,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         document.addSubview(content)
         content.translatesAutoresizingMaskIntoConstraints = false
         let scroll = OverflowScrollView()
+        scroll.autohidesScrollers = true
         scroll.hasVerticalScroller = true
         scroll.verticalScrollElasticity = .none
         scroll.horizontalScrollElasticity = .none
@@ -195,7 +233,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
                 control.setLabel(label, forSegment: index)
             }
         }
-        for control: NSControl in [mode, theme, colorTheme, eventStyle, resolution, course] {
+        for control: NSControl in [mode, theme, colorTheme, eventStyle, resolution] {
             control.target = self
             control.action = #selector(changeControl(_:))
         }
@@ -222,7 +260,6 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             vertical: false, spacing: 8)
         dateRange.distribution = .fillEqually
         moduleFields = Self.stack([field("Module name", name), dateRange])
-        courseField = field("Include", course)
         monthField = field("Month", month)
         exportMenu.addItem(withTitle: "Export")
         for (title, action) in [
@@ -301,11 +338,11 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         calendarColors.setContentCompressionResistancePriority(.required, for: .horizontal)
         appearanceFields = Self.stack(
             [
+                field("Image size", imageSizeFields),
                 field("Preview appearance", theme),
                 field("Color theme", colorThemeRow),
                 customColorFields!,
                 field("Event style", eventStyle),
-                field("Image size", imageSizeFields),
                 showTitle,
                 rooms, iconSpace,
             ], spacing: 14)
@@ -329,7 +366,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         let settings = Self.stack(
             [
                 heading, field("View", mode), moduleFields, monthField,
-                courseField!, includeWeekends, separator, appearanceToggle,
+                includeWeekends, separator, appearanceToggle,
                 appearanceFields!,
             ], spacing: 18)
         for child in settings.arrangedSubviews {
@@ -341,6 +378,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             }
         }
         let sidebar = scroll(settings)
+        sidebar.hasVerticalScroller = false
         sidebar.widthAnchor.constraint(equalToConstant: 270).isActive = true
 
         preview.imageScaling = .scaleProportionallyUpOrDown
@@ -353,11 +391,6 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         previewTab.view = preview
         tabs.addTabViewItem(previewTab)
 
-        let instruction = NSTextField(
-            wrappingLabelWithString:
-                "Uncheck an event to leave it out of the wallpaper and exports. Select a row to read its full details."
-        )
-        instruction.font = .systemFont(ofSize: 12)
         for (id, title, width) in [
             ("included", "Include", 65.0), ("date", "Date and time", 175.0),
             ("title", "Session", 280.0), ("source", "Calendar", 120.0),
@@ -375,9 +408,13 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.setAccessibilityLabel("Calendar events")
         let tableScroll = NSScrollView()
+        tableScroll.autohidesScrollers = true
         tableScroll.documentView = table
         tableScroll.hasVerticalScroller = true
         tableScroll.hasHorizontalScroller = true
+        tableScroll.verticalScroller = PersistentScroller()
+        tableScroll.horizontalScroller = PersistentScroller()
+        tableScroll.scrollerStyle = .legacy
         details.isEditable = false
         details.isSelectable = true
         details.isRichText = false
@@ -387,10 +424,13 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         details.isHorizontallyResizable = false
         details.textContainer?.widthTracksTextView = true
         details.setAccessibilityLabel("Full event details")
-        details.string = "Select an event to see its full title, location, description, and source."
+        details.string = "Click on an event to see its full details."
         let detailScroll = NSScrollView()
+        detailScroll.autohidesScrollers = true
         detailScroll.documentView = details
         detailScroll.hasVerticalScroller = true
+        detailScroll.verticalScroller = PersistentScroller()
+        detailScroll.scrollerStyle = .legacy
         let eventSplit = NSSplitView()
         eventSplit.isVertical = false
         eventSplit.dividerStyle = .thin
@@ -400,15 +440,10 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         detailScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
         let eventView = NSView()
         eventView.autoresizingMask = [.width, .height]
-        for child in [instruction, eventSplit] {
-            eventView.addSubview(child)
-            child.translatesAutoresizingMaskIntoConstraints = false
-        }
+        eventView.addSubview(eventSplit)
+        eventSplit.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            instruction.topAnchor.constraint(equalTo: eventView.topAnchor),
-            instruction.leadingAnchor.constraint(equalTo: eventView.leadingAnchor),
-            instruction.trailingAnchor.constraint(equalTo: eventView.trailingAnchor),
-            eventSplit.topAnchor.constraint(equalTo: instruction.bottomAnchor, constant: 10),
+            eventSplit.topAnchor.constraint(equalTo: eventView.topAnchor),
             eventSplit.bottomAnchor.constraint(equalTo: eventView.bottomAnchor),
             eventSplit.leadingAnchor.constraint(equalTo: eventView.leadingAnchor),
             eventSplit.trailingAnchor.constraint(equalTo: eventView.trailingAnchor),
@@ -459,7 +494,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
 
     func setReady(_ ready: Bool) {
         for control: NSControl in [
-            mode, theme, colorTheme, calendarColors, eventStyle, resolution, course, name, start,
+            mode, theme, colorTheme, calendarColors, eventStyle, resolution, name, start,
             end, month, showTitle, rooms,
             includeWeekends, iconSpace, exportMenu,
         ] { control.isEnabled = ready }
@@ -484,9 +519,11 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         for preset in snapshot["colorThemes"] as? [[String: String]] ?? [] {
             colorTheme.addItem(withTitle: preset["name"] ?? "")
             colorTheme.lastItem?.representedObject = preset["id"]
+            colorTheme.lastItem?.image = colorMenuDot(hex: preset["accent"])
         }
         colorTheme.addItem(withTitle: "Custom")
         colorTheme.lastItem?.representedObject = "custom"
+        colorTheme.lastItem?.image = colorMenuDot(hex: nil)
         let selectedTheme = editor["colorTheme"] as? String ?? "forest"
         colorTheme.select(
             colorTheme.itemArray.first { $0.representedObject as? String == selectedTheme })
@@ -519,22 +556,6 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         includeWeekends.state = editor["includeWeekends"] as? Bool == true ? .on : .off
         iconSpace.state = editor["iconSpace"] as? Bool == true ? .on : .off
         updateResolutionMenu()
-        let filter = editor["course"] as? String ?? ""
-        let configured = snapshot["courseCode"] as? String ?? ""
-        course.removeAllItems()
-        course.addItem(withTitle: "All calendar events")
-        course.lastItem?.representedObject = ""
-        for code in [configured, filter]
-        where !code.isEmpty
-            && !course.itemArray.contains(where: { $0.representedObject as? String == code })
-        {
-            course.addItem(withTitle: "Course only · \(code)")
-            course.lastItem?.representedObject = code
-        }
-        courseField.isHidden = course.numberOfItems <= 1
-        course.selectItem(
-            at: course.itemArray.firstIndex(where: { $0.representedObject as? String == filter })
-                ?? 0)
         let included = snapshot["includedCount"] as? Int ?? 0
         summary.stringValue = "\(included) events included · \(events.count - included) excluded"
         let size = "\(editor["width"] as? Int ?? 3024) × \(editor["height"] as? Int ?? 1964)"
@@ -630,7 +651,6 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             patch["colorTheme"] = selected
             if selected == "custom" { patch["customColors"] = customColors }
         case calendarColors: patch["calendarColors"] = calendarColors.state == .on
-        case course: patch["course"] = course.selectedItem?.representedObject as? String ?? ""
         case resolution:
             if resolution.titleOfSelectedItem == "Custom…" {
                 showCustomSize()
@@ -740,8 +760,8 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         guard events.indices.contains(table.selectedRow) else {
             details.string =
                 events.isEmpty
-                ? "No events in this range and course filter."
-                : "Select an event to see its full details."
+                ? "No events in this range."
+                : "Click on an event to see its full details."
             return
         }
         let event = events[table.selectedRow]

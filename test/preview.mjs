@@ -86,7 +86,7 @@ test('preview switches theme, edits module dates, changes month, reveals details
     el(id).dispatchEvent(new Event(type, { bubbles: true }));
   };
   assert.equal(errors.length, 0);
-  assert.equal(document.querySelectorAll('.event').length, 4);
+  assert.equal(document.querySelectorAll('.event').length, 5);
   assert.equal(
     document.querySelector('aside').lastElementChild.classList.contains('export-actions'),
     true,
@@ -105,7 +105,7 @@ test('preview switches theme, edits module dates, changes month, reveals details
   assert.equal(document.querySelectorAll('.event').length, 3);
   change('mode', 'month');
   change('month', '2026-09');
-  assert.equal(document.querySelectorAll('.event').length, 5);
+  assert.equal(document.querySelectorAll('.event').length, 7);
   assert.match(el('wallpaper').innerHTML, /September 2026/);
   assert.doesNotMatch(el('wallpaper').innerHTML, /SATURDAY|SUNDAY/);
   el('weekends').checked = true;
@@ -113,7 +113,6 @@ test('preview switches theme, edits module dates, changes month, reveals details
   assert.match(el('wallpaper').innerHTML, /SATURDAY.*SUNDAY/s);
   assert.match(el('event-list').textContent, /R100/);
   assert.ok(document.querySelector('.conflict'));
-  change('course', 'all', 'change');
   assert.equal(document.querySelectorAll('.event').length, 7);
   change('mode', 'module');
   change('end', '2026-01-01');
@@ -175,8 +174,8 @@ test('event exclusions remain reversible, persist on reload and affect exports',
   input.checked = false;
   input.dispatchEvent(new Event('change'));
   assert.equal(findFinal().checked, false);
-  assert.equal(document.querySelectorAll('.event').length, 4);
-  assert.match(document.getElementById('detail-count').textContent, /3 included · 1 excluded/);
+  assert.equal(document.querySelectorAll('.event').length, 5);
+  assert.match(document.getElementById('detail-count').textContent, /4 included · 1 excluded/);
   assert.doesNotMatch(document.getElementById('wallpaper').innerHTML, /Launch presentation/);
   document.getElementById('theme').value = 'dark';
   document.getElementById('theme').dispatchEvent(new Event('input'));
@@ -194,7 +193,7 @@ test('event exclusions remain reversible, persist on reload and affect exports',
   assert.match(reload.window.document.getElementById('wallpaper').innerHTML, /Launch presentation/);
   assert.match(
     reload.window.document.getElementById('detail-count').textContent,
-    /4 included · 0 excluded/,
+    /5 included · 0 excluded/,
   );
   dom.window.close();
   reload.window.close();

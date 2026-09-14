@@ -384,6 +384,10 @@ final class StatusLabel: NSTextField {
                 try await engine.start()
                 workerStarted = true
                 if let stateLoadError { throw WallpaperError.invalid(stateLoadError) }
+                // The editor includes all calendar events; clear the retired course filter.
+                var editor = saved["editor"] as? [String: Any] ?? [:]
+                editor["course"] = ""
+                saved["editor"] = editor
                 _ = try await js("return window.nativeLoad(payload)", ["payload": saved])
                 ready = true
                 editorView.setReady(true)
@@ -1171,10 +1175,12 @@ final class StatusLabel: NSTextField {
             "Pink": 0x9b3e70, "Orange": 0x91501f, "Red": 0xa13c38,
         ]
         for item in sourceColor.itemArray {
-            let color: NSColor
             if item.title == "Custom" {
-                color = customSourceColor
-            } else if let rgb = presets[item.title] {
+                item.image = colorMenuDot(hex: nil)
+                continue
+            }
+            let color: NSColor
+            if let rgb = presets[item.title] {
                 color = NSColor(
                     srgbRed: CGFloat((rgb >> 16) & 255) / 255,
                     green: CGFloat((rgb >> 8) & 255) / 255,

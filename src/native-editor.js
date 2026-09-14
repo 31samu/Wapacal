@@ -200,7 +200,11 @@ window.nativeSnapshot = function () {
   return {
     revision,
     editor: { ...state, excludedEventIds: [...state.excludedEventIds] },
-    colorThemes: Object.entries(colorThemes).map(([id, theme]) => ({ id, name: theme.name })),
+    colorThemes: Object.entries(colorThemes).map(([id, theme]) => ({
+      id,
+      name: theme.name,
+      accent: theme.light.accent,
+    })),
     customColors: customThemeColors(state),
     courseCode,
     events: candidates.map((event) => ({

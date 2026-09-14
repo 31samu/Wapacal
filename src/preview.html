@@ -303,17 +303,10 @@
           <label for="resolution">Image size</label
           ><select id="resolution"></select>
         </div>
-        <div class="field">
-          <label for="course">Events</label
-          ><select id="course">
-            <option value="course">Course only</option>
-            <option value="all">All calendar events</option>
-          </select>
-        </div>
         <fieldset>
           <legend>Layout</legend>
           <label class="check"><input type="checkbox" id="show-title" checked /> Show title</label
-          ><label class="check"><input type="checkbox" id="rooms" checked /> Show rooms</label
+          ><label class="check"><input type="checkbox" id="rooms" checked /> Show locations</label
           ><label class="check"
             ><input type="checkbox" id="weekends" /> Include Saturdays and Sundays</label
           ><label class="check"
@@ -375,7 +368,7 @@
         start: config.module.start,
         end: config.module.end,
         proposed: config.module.proposed,
-        course: config.allCalendars ? '' : config.course,
+        course: '',
         timeZone: config.timeZone,
         width: config.width,
         height: config.height,
@@ -441,7 +434,6 @@
       } catch {
         $('selection-note').textContent = 'Event choices last for this preview session.';
       }
-      $('course').value = state.course ? 'course' : 'all';
       $('module-name').value = state.name;
       $('start').value = state.start;
       $('end').value = state.end;
@@ -674,10 +666,6 @@
           render();
         }),
       );
-      $('course').addEventListener('change', () => {
-        state.course = $('course').value === 'all' ? '' : config.course;
-        render();
-      });
       $('resolution').addEventListener('change', () => {
         [state.width, state.height] = $('resolution').value.split('x').map(Number);
         render();
