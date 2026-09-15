@@ -258,3 +258,45 @@ print("Storage migration scope checks passed")
     /checks passed/,
   );
 });
+
+test('wallpaper storage keeps image URLs immutable and protects restoration during cleanup', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wapacal-image-storage-'));
+  const file = join(dir, 'main.swift');
+  await writeFile(
+    file,
+    `import AppKit
+
+try ensureWorkspaceDirectories()
+let firstData = Data("first image".utf8)
+let first = try storeAppliedWallpaper(firstData)
+let second = try storeAppliedWallpaper(Data("second image".utf8))
+let third = try storeAppliedWallpaper(Data("third image".utf8))
+assert(Set([first, second, third]).count == 3)
+let oldDate = Date(timeIntervalSince1970: 1)
+try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: first.path)
+let repeated = try storeAppliedWallpaper(firstData)
+assert(repeated == first)
+let retained = try Data(contentsOf: first)
+assert(retained == firstData)
+let modified = try first.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+assert(modified == oldDate, "identical images must not rewrite a cached URL")
+let backup = WallpaperBackup(screenID: "fixture", url: first, options: [:])
+try JSONEncoder().encode(backup).write(to: recoveryDirectory().appendingPathComponent("restore-fixture.json"))
+for index in 0..<15 { _ = try storeAppliedWallpaper(Data("image \\(index)".utf8)) }
+try cleanupRuntimeFiles()
+assert(FileManager.default.fileExists(atPath: first.path), "cleanup must preserve the restore image")
+let files = try FileManager.default.contentsOfDirectory(at: appliedDirectory(), includingPropertiesForKeys: nil)
+assert(files.count == 11, "keep ten inactive images plus the protected restore image")
+print("Wallpaper storage checks passed")
+`,
+  );
+  const executable = join(dir, 'checks');
+  compileNative(file, executable, { stdio: 'pipe' });
+  assert.match(
+    execFileSync(executable, [], {
+      encoding: 'utf8',
+      env: { ...process.env, WAPACAL_APP_SUPPORT: join(dir, 'support') },
+    }),
+    /checks passed/,
+  );
+});

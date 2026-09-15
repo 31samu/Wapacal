@@ -74,6 +74,10 @@ final class StatusLabel: NSTextField {
     var workerStarted = false
     var item: NSStatusItem!
     let status = StatusLabel(wrappingLabelWithString: "Loading your calendar…")
+    private var statusHeight: NSLayoutConstraint?
+    private var statusSpacing: NSLayoutConstraint?
+    let showMessages = NSButton(
+        checkboxWithTitle: "Show messages below the editor", target: nil, action: nil)
     let urlField = NSTextField()
     let sourcePicker = NSPopUpButton()
     var lastSelectedSourceID: String?
@@ -313,6 +317,9 @@ final class StatusLabel: NSTextField {
             child.translatesAutoresizingMaskIntoConstraints = false
         }
         window.contentView = root
+        statusHeight = status.heightAnchor.constraint(equalToConstant: 30)
+        statusSpacing = editorView.view.bottomAnchor.constraint(
+            equalTo: status.topAnchor, constant: -10)
         NSLayoutConstraint.activate([
             header.heightAnchor.constraint(equalToConstant: 32),
             header.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
@@ -325,12 +332,13 @@ final class StatusLabel: NSTextField {
                 equalTo: wallpaperSharingWarning.bottomAnchor, constant: 14),
             editorView.view.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
             editorView.view.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            editorView.view.bottomAnchor.constraint(equalTo: status.topAnchor, constant: -10),
+            statusSpacing!,
             status.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
             status.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
             status.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
-            status.heightAnchor.constraint(equalToConstant: 30),
+            statusHeight!,
         ])
+        updateMessageVisibility()
         refreshWallpaperSharingWarning()
         editorView.onChange = { [weak self] patch in self?.queueEditorPatch(patch) }
         editorView.onInclude = { [weak self] uid, included in
@@ -723,6 +731,9 @@ final class StatusLabel: NSTextField {
         automatic.target = self
         automatic.action = #selector(toggleUpdates)
         automatic.state = saved["autoApply"] as? Bool == true ? .on : .off
+        showMessages.target = self
+        showMessages.action = #selector(toggleMessages)
+        updateMessageVisibility()
         login.target = self
         login.action = #selector(toggleLogin)
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -737,7 +748,7 @@ final class StatusLabel: NSTextField {
                         automatic,
                         note(
                             "Updates the selected display, or all connected displays, when calendars or your edits change. Wapacal must be running."
-                        ), login,
+                        ), login, showMessages,
                     ], spacing: 10),
                 separator,
                 EditorViewController.stack(
@@ -857,11 +868,7 @@ final class StatusLabel: NSTextField {
                 let size = wallpaperPixelSize(screen)
                 return "\(screen.localizedName): \(Int(size.width)) × \(Int(size.height))"
             }
-            let editor = editorView.editor
-            var notes =
-                sizes + [
-                    "Apply uses each screen's size. Preview and exports use \(editor["width"] as? Int ?? 3024) × \(editor["height"] as? Int ?? 1964)."
-                ]
+            var notes = [sizes.joined(separator: "\n")]
             if wallpaperSharesAllSpacesAndDisplays() {
                 notes.append(
                     "Turn off macOS's “Show on all Spaces” setting to use separate display sizes.")
@@ -1391,6 +1398,18 @@ final class StatusLabel: NSTextField {
             }
         }
     }
+    func updateMessageVisibility() {
+        let visible = saved["showMessages"] as? Bool ?? true
+        showMessages.state = visible ? .on : .off
+        status.isHidden = !visible
+        statusHeight?.constant = visible ? 30 : 0
+        statusSpacing?.constant = visible ? -10 : 0
+    }
+    @objc func toggleMessages() {
+        saved["showMessages"] = showMessages.state == .on
+        updateMessageVisibility()
+        persist()
+    }
     @objc func toggleUpdates() {
         saved["autoApply"] = automatic.state == .on
         persist()
@@ -1786,6 +1805,7 @@ final class StatusLabel: NSTextField {
                 "subscriptions": [] as [[String: Any]], "courseCode": "", "refreshInterval": 3600.0,
                 "nextCheck": 0.0,
             ]
+            updateMessageVisibility()
             reloadSources()
             refreshPicker.selectItem(at: 2)
             persist()

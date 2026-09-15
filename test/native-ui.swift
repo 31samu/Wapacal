@@ -281,33 +281,39 @@ Task { @MainActor in
                     dark: CGImageSourceCreateImageAtIndex(source, 0, nil)!, to: changed)
                 let changedData = try readBounded(changed)
                 try require(changedData != originalData, "refresh fixture has different content")
+                try encodePair(
+                    light: CGImageSourceCreateImageAtIndex(source, 0, nil)!,
+                    dark: CGImageSourceCreateImageAtIndex(source, 0, nil)!, to: changed)
+                let thirdData = try readBounded(changed)
                 let backupData = try Data(contentsOf: backupURL(screen))
-                var updateURLs: Set<URL> = [url.standardizedFileURL]
-                for index in 0..<4 {
-                    // Change both slots, then change both again to exercise reused files.
-                    let expectedData = index < 2 ? changedData : originalData
+                var imagesByURL: [URL: Data] = [url.standardizedFileURL: originalData]
+                for expectedData in [changedData, thirdData, originalData, originalData] {
                     try expectedData.write(to: changed, options: .atomic)
-                    let previousURL = NSWorkspace.shared.desktopImageURL(for: screen)
                     _ = try applyWallpaper(changed, screen: screen)
                     let updatedURL = NSWorkspace.shared.desktopImageURL(for: screen)!
-                    try require(
-                        updatedURL.standardizedFileURL != previousURL?.standardizedFileURL,
-                        "each update changes the URL to avoid the active image cache")
-                    updateURLs.insert(updatedURL.standardizedFileURL)
-                    try require(updateURLs.count <= 2, "updates reuse at most two display URLs")
+                        .standardizedFileURL
+                    if let existing = imagesByURL[updatedURL] {
+                        try require(existing == expectedData, "a reused URL has identical content")
+                    }
+                    imagesByURL[updatedURL] = expectedData
+                    for (oldURL, oldData) in imagesByURL {
+                        let retainedData = try readBounded(oldURL)
+                        try require(
+                            retainedData == oldData, "earlier wallpaper images stay unchanged")
+                    }
                     let appliedData = try readBounded(updatedURL)
                     try require(appliedData == expectedData, "repeated update writes the new image")
                     _ = try inspectData(appliedData)
                     let savedBackup = try Data(contentsOf: backupURL(screen))
                     try require(savedBackup == backupData, "refresh preserves the original backup")
                 }
-                try require(updateURLs.count == 2, "updates alternate URLs to refresh the cache")
+                try require(imagesByURL.count == 3, "three images have three stable URLs")
             }
             let appliedFiles = try FileManager.default.contentsOfDirectory(
                 at: appliedDirectory(), includingPropertiesForKeys: nil)
             try require(
-                appliedFiles.filter { $0.pathExtension == "heic" }.count == screens.count * 2,
-                "repeated updates keep two wallpaper files per display")
+                appliedFiles.filter { $0.pathExtension == "heic" }.count <= screens.count * 3,
+                "identical images do not create duplicate files")
             editorApp.restore()
             for (screen, original) in zip(screens, originals) {
                 try require(

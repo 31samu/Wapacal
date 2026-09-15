@@ -523,3 +523,97 @@ test('unconfigured custom colors default to neutral and light boxes respect cust
   }
   dom.window.close();
 });
+
+test('event text size changes rendering, survives reload, and rejects invalid values', async () => {
+  const { dom, w, seed, snapshot } = await setup();
+  assert.equal(snapshot().editor.eventTextScale, 1);
+  for (const eventStyle of ['text', 'boxes']) {
+    for (const eventTextScale of [0.75, 1.5]) {
+      w.nativeUpdate({ eventStyle, eventTextScale });
+      assert.match(snapshot().svg, new RegExp(`font-size="${14 * eventTextScale}"`));
+      const editor = snapshot().editor;
+      w.nativeLoad({ ...seed, editor });
+      assert.equal(snapshot().editor.eventTextScale, eventTextScale);
+    }
+  }
+  const before = snapshot();
+  for (const eventTextScale of [0.5, 2, '1', NaN, Infinity]) {
+    assert.throws(() => w.nativeUpdate({ eventTextScale }), /event text size/);
+    assert.deepEqual(snapshot(), before);
+  }
+  dom.window.close();
+});
+
+test('edge padding changes layout, survives reload, and rejects invalid values', async () => {
+  const { dom, w, seed, snapshot } = await setup();
+  const position = (label) => {
+    const doc = new JSDOM(snapshot().svg, { contentType: 'image/svg+xml' }).window.document;
+    const node = [...doc.querySelectorAll('text')].find((node) => node.textContent === label);
+    return ['x', 'y'].map((axis) => Number(node.getAttribute(axis)));
+  };
+  const footerLabel = 'Snapshot ' + snapshot().editor.snapshotDate;
+  const footer = position(footerLabel);
+  const week = position('WK');
+  const zone = position(snapshot().editor.timeZone);
+  const patch = { paddingLeft: 96, paddingRight: 96, paddingTop: 44, paddingBottom: 42 };
+  w.nativeUpdate(patch);
+  assert.deepEqual(position('WK'), [week[0] + 20, week[1] + 20]);
+  assert.deepEqual(position(footerLabel), [footer[0] + 20, footer[1] - 20]);
+  assert.deepEqual(position(snapshot().editor.timeZone), [zone[0] - 20, zone[1] + 20]);
+  const editor = snapshot().editor;
+  const svg = snapshot().svg;
+  w.nativeLoad({ ...seed, editor });
+  assert.equal(snapshot().svg, svg);
+  for (const [key, value] of Object.entries(patch)) assert.equal(snapshot().editor[key], value);
+  const before = snapshot();
+  for (const key of Object.keys(patch)) {
+    for (const value of [-1, 201, '20', NaN, Infinity]) {
+      assert.throws(() => w.nativeUpdate({ [key]: value }), /padding/);
+      assert.deepEqual(snapshot(), before);
+    }
+  }
+  dom.window.close();
+});
+
+test('visibility options change rendering and survive reload', async () => {
+  const { dom, w, seed, snapshot } = await setup();
+  const original = snapshot().svg;
+  for (const key of [
+    'showTimeZone',
+    'showWeekNumbers',
+    'highlightToday',
+    'showSnapshotDate',
+    'showCalendarLegend',
+    'showEventTimes',
+  ]) {
+    assert.equal(snapshot().editor[key], true);
+    w.nativeUpdate({ [key]: false });
+    const editor = snapshot().editor;
+    w.nativeLoad({ ...seed, editor });
+    assert.equal(snapshot().editor[key], false);
+    const before = snapshot();
+    assert.throws(() => w.nativeUpdate({ [key]: 'false' }), /visibility/);
+    assert.deepEqual(snapshot(), before);
+    w.nativeUpdate({ [key]: true });
+    assert.equal(snapshot().svg, original);
+  }
+  const editor = snapshot().editor;
+  const render = (patch) =>
+    renderWallpaper([], { ...editor, mode: 'month', month: '2026-09', ...patch });
+  const normal = render({});
+  const noZone = render({ showTimeZone: false });
+  assert.ok(normal.bounds.some((item) => item.text === editor.timeZone));
+  assert.ok(!noZone.bounds.some((item) => item.text === editor.timeZone));
+  const noWeeks = render({ showWeekNumbers: false });
+  assert.ok(!noWeeks.bounds.some((item) => item.text === 'WK'));
+  const mondayX = (result) => result.bounds.find((item) => item.text === 'MONDAY').x;
+  assert.equal(mondayX(noWeeks), mondayX(normal) - 44);
+  for (const today of ['2026-09-08', '2026-09-12']) {
+    const highlighted = render({ today });
+    assert.ok(highlighted.bounds.some((item) => item.text.startsWith('TODAY')));
+    const hidden = render({ today, highlightToday: false });
+    assert.ok(!hidden.bounds.some((item) => item.text.startsWith('TODAY')));
+    assert.equal(hidden.svg, render({ today: undefined }).svg);
+  }
+  dom.window.close();
+});

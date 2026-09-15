@@ -35,6 +35,55 @@ func colorMenuDot(hex: String?) -> NSImage {
     }
 }
 
+final class EditorSlider: NSSlider {
+    private(set) var isTracking = false
+    var onTrackingEnded: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled, let cell = cell as? NSSliderCell, let window else { return }
+        let originalValue = doubleValue
+        let start = convert(event.locationInWindow, from: nil)
+        let knob = cell.knobRect(flipped: isFlipped)
+        let grabOffset = knob.contains(start) ? start.x - knob.midX : 0
+        doubleValue = minValue
+        let minimumX = cell.knobRect(flipped: isFlipped).midX
+        doubleValue = maxValue
+        let maximumX = cell.knobRect(flipped: isFlipped).midX
+        doubleValue = originalValue
+        guard maximumX > minimumX else { return }
+        isTracking = true
+        defer { isTracking = false }
+
+        func update(_ event: NSEvent) {
+            let point = convert(event.locationInWindow, from: nil)
+            let fraction = min(1, max(0, (point.x - grabOffset - minimumX) / (maximumX - minimumX)))
+            doubleValue = minValue + fraction * (maxValue - minValue)
+            sendAction(action, to: target)
+        }
+        update(event)
+        while let next = window.nextEvent(
+            matching: [.leftMouseDragged, .leftMouseUp, .keyDown],
+            until: .distantFuture, inMode: .eventTracking, dequeue: true)
+        {
+            if next.type == .keyDown {
+                if next.keyCode == 53 {
+                    doubleValue = originalValue
+                    // Refresh the number while tracking, without committing a settings change.
+                    sendAction(action, to: target)
+                    return
+                }
+            } else {
+                update(next)
+                if next.type == .leftMouseUp {
+                    isTracking = false
+                    onTrackingEnded?()
+                    return
+                }
+            }
+        }
+    }
+}
+
 private final class ThemeColorWell: NSColorWell {
     override var color: NSColor {
         didSet { needsDisplay = true }
@@ -122,6 +171,11 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     private(set) var colorWells: [String: NSColorWell] = [:]
     private var customColors: [String: [String: String]] = [:]
     let eventStyle = NSSegmentedControl()
+    let eventTextSize = EditorSlider(
+        value: 100, minValue: 75, maxValue: 150, target: nil, action: nil)
+    let eventTextSizeValue = NSTextField(labelWithString: "100%")
+    private var pendingEventTextPercent: Int?
+    let resetEventTextSize = NSButton(title: "Revert", target: nil, action: nil)
     let resolution = NSPopUpButton()
     private var customSizeAlert: NSAlert?
     private let customWidth = NSTextField()
@@ -134,13 +188,25 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     let month = NSDatePicker()
     let showTitle = NSButton(checkboxWithTitle: "Show title", target: nil, action: nil)
     let rooms = NSButton(checkboxWithTitle: "Show locations", target: nil, action: nil)
+    let showTimeZone = NSButton(checkboxWithTitle: "Show time zone", target: nil, action: nil)
+    let showSnapshotDate = NSButton(
+        checkboxWithTitle: "Show snapshot date", target: nil, action: nil)
+    let showCalendarLegend = NSButton(
+        checkboxWithTitle: "Show calendar legend", target: nil, action: nil)
+    let showEventTimes = NSButton(checkboxWithTitle: "Show event times", target: nil, action: nil)
+    let showWeekNumbers = NSButton(checkboxWithTitle: "Show week numbers", target: nil, action: nil)
+    let highlightToday = NSButton(checkboxWithTitle: "Highlight today", target: nil, action: nil)
     let includeWeekends = NSButton(
         checkboxWithTitle: "Include Saturdays and Sundays", target: nil, action: nil)
-    let iconSpace = NSButton(
-        checkboxWithTitle: "Leave room for desktop icons", target: nil, action: nil)
     let exportMenu = NSPopUpButton(frame: .zero, pullsDown: true)
     let appearanceToggle = NSButton(checkboxWithTitle: "Appearance", target: nil, action: nil)
     private(set) var appearanceFields: NSStackView!
+    private let moreAppearanceToggle = NSButton(title: "More options", target: nil, action: nil)
+    private var moreAppearanceFields: NSStackView!
+    private var paddingResetButtons: [String: NSButton] = [:]
+    private var paddingSliders: [String: EditorSlider] = [:]
+    private var paddingValues: [String: NSTextField] = [:]
+    private let paddingDefaults = ["Left": 76, "Right": 76, "Top": 24, "Bottom": 22]
     private var moduleFields: NSStackView!
     private var monthField: NSStackView!
     private let suggestionList = NSStackView()
@@ -233,10 +299,34 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
                 control.setLabel(label, forSegment: index)
             }
         }
-        for control: NSControl in [mode, theme, colorTheme, eventStyle, resolution] {
+        for control: NSControl in [mode, theme, colorTheme, eventStyle, eventTextSize, resolution] {
             control.target = self
             control.action = #selector(changeControl(_:))
         }
+        resetEventTextSize.target = self
+        resetEventTextSize.action = #selector(changeControl(_:))
+        resetEventTextSize.title = ""
+        resetEventTextSize.image = NSImage(
+            systemSymbolName: "arrow.counterclockwise.circle", accessibilityDescription: nil)
+        resetEventTextSize.imagePosition = .imageOnly
+        resetEventTextSize.isBordered = false
+        resetEventTextSize.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        resetEventTextSize.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        resetEventTextSize.controlSize = .small
+        resetEventTextSize.toolTip = "Reset event text size to 100%"
+        resetEventTextSize.setAccessibilityLabel("Reset event text size to 100%")
+        resetEventTextSize.setContentHuggingPriority(.required, for: .horizontal)
+        eventTextSize.isContinuous = true
+        eventTextSize.onTrackingEnded = { [weak self] in
+            guard let self else { return }
+            self.changeControl(self.eventTextSize)
+        }
+        eventTextSizeValue.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        eventTextSizeValue.alignment = .right
+        eventTextSizeValue.widthAnchor.constraint(equalToConstant: 42).isActive = true
+        eventTextSize.setAccessibilityLabel("Event text size")
+        eventTextSize.setAccessibilityIdentifier("event-text-size")
+        eventTextSizeValue.setContentHuggingPriority(.required, for: .horizontal)
         name.delegate = self
         name.setAccessibilityIdentifier("module-name")
         for picker in [start, end, month] {
@@ -247,7 +337,11 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             picker.target = self
             picker.action = #selector(changeControl(_:))
         }
-        for control in [showTitle, rooms, includeWeekends, iconSpace, calendarColors] {
+        for control in [
+            showTitle, rooms, showTimeZone, showWeekNumbers, showSnapshotDate, showCalendarLegend,
+            showEventTimes, highlightToday, includeWeekends,
+            calendarColors,
+        ] {
             control.target = self
             control.action = #selector(changeControl(_:))
         }
@@ -336,6 +430,58 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         colorTheme.setAccessibilityLabel("Color theme")
         calendarColors.setContentHuggingPriority(.required, for: .horizontal)
         calendarColors.setContentCompressionResistancePriority(.required, for: .horizontal)
+        var paddingFields: [NSView] = []
+        for side in ["Left", "Right", "Top", "Bottom"] {
+            let slider = EditorSlider(
+                value: Double(paddingDefaults[side]!), minValue: 0, maxValue: 200,
+                target: self, action: #selector(changePadding))
+            slider.isContinuous = true
+            slider.onTrackingEnded = { [weak self, weak slider] in
+                guard let self, let slider else { return }
+                self.changePadding(slider)
+            }
+            slider.setAccessibilityLabel("\(side) padding")
+            slider.toolTip = "Spacing scales with the wallpaper resolution."
+            let value = NSTextField(labelWithString: "\(paddingDefaults[side]!)")
+            value.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+            value.alignment = .right
+            value.widthAnchor.constraint(equalToConstant: 32).isActive = true
+            let reset = NSButton(title: "Revert", target: self, action: #selector(resetPadding))
+            reset.image = NSImage(
+                systemSymbolName: "arrow.counterclockwise.circle", accessibilityDescription: nil)
+            reset.imagePosition = .imageOnly
+            reset.isBordered = false
+            reset.widthAnchor.constraint(equalToConstant: 24).isActive = true
+            reset.heightAnchor.constraint(equalToConstant: 24).isActive = true
+            reset.controlSize = .small
+            reset.toolTip = "Reset \(side.lowercased()) padding to \(paddingDefaults[side]!)"
+            reset.setAccessibilityLabel(reset.toolTip!)
+            reset.setContentHuggingPriority(.required, for: .horizontal)
+            paddingResetButtons[side] = reset
+            paddingSliders[side] = slider
+            paddingValues[side] = value
+            paddingFields.append(
+                field(
+                    "\(side) padding",
+                    Self.stack([slider, value, reset], vertical: false, spacing: 8)))
+        }
+        moreAppearanceFields = Self.stack(
+            [
+                showTitle, showTimeZone, showWeekNumbers, highlightToday, showEventTimes,
+                rooms, showSnapshotDate, showCalendarLegend,
+            ] + paddingFields,
+            spacing: 14)
+        moreAppearanceFields.isHidden = true
+        moreAppearanceToggle.setButtonType(.onOff)
+        moreAppearanceToggle.isBordered = false
+        moreAppearanceToggle.image = NSImage(
+            systemSymbolName: "chevron.right", accessibilityDescription: nil)
+        moreAppearanceToggle.imagePosition = .imageLeft
+        moreAppearanceToggle.alignment = .left
+        moreAppearanceToggle.font = .systemFont(ofSize: 13, weight: .semibold)
+        moreAppearanceToggle.target = self
+        moreAppearanceToggle.action = #selector(toggleMoreAppearance)
+        moreAppearanceToggle.setAccessibilityLabel("Show more appearance options")
         appearanceFields = Self.stack(
             [
                 field("Image size", imageSizeFields),
@@ -343,8 +489,12 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
                 field("Color theme", colorThemeRow),
                 customColorFields!,
                 field("Event style", eventStyle),
-                showTitle,
-                rooms, iconSpace,
+                field(
+                    "Event text size",
+                    Self.stack(
+                        [eventTextSize, eventTextSizeValue, resetEventTextSize], vertical: false,
+                        spacing: 8)),
+                moreAppearanceToggle, moreAppearanceFields!,
             ], spacing: 14)
         appearanceFields.isHidden = true
         displaySizes.widthAnchor.constraint(equalTo: resolutionRow.widthAnchor).isActive = true
@@ -372,7 +522,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         for child in settings.arrangedSubviews {
             child.widthAnchor.constraint(equalTo: settings.widthAnchor).isActive = true
         }
-        for group in [moduleFields!, appearanceFields!] {
+        for group in [moduleFields!, appearanceFields!, moreAppearanceFields!] {
             for child in group.arrangedSubviews {
                 child.widthAnchor.constraint(equalTo: group.widthAnchor).isActive = true
             }
@@ -494,11 +644,24 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
 
     func setReady(_ ready: Bool) {
         for control: NSControl in [
-            mode, theme, colorTheme, calendarColors, eventStyle, resolution, name, start,
-            end, month, showTitle, rooms,
-            includeWeekends, iconSpace, exportMenu,
+            mode, theme, colorTheme, calendarColors, eventStyle, eventTextSize,
+            resolution, name,
+            start,
+            end, month, showTitle, rooms, showTimeZone, showWeekNumbers, showSnapshotDate,
+            showCalendarLegend, showEventTimes, highlightToday,
+            includeWeekends, exportMenu,
         ] { control.isEnabled = ready }
         for well in colorWells.values { well.isEnabled = ready }
+        for slider in paddingSliders.values { slider.isEnabled = ready }
+        updateRevertButtons()
+    }
+    private func updateRevertButtons() {
+        resetEventTextSize.isEnabled =
+            eventTextSize.isEnabled && eventTextSize.doubleValue.rounded() != 100
+        for (side, slider) in paddingSliders {
+            paddingResetButtons[side]?.isEnabled =
+                slider.isEnabled && slider.doubleValue.rounded() != Double(paddingDefaults[side]!)
+        }
     }
     func showError(_ message: String) {
         error.stringValue = message
@@ -511,7 +674,21 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             ? events[table.selectedRow]["uid"] as? String : nil
         editor = snapshot["editor"] as? [String: Any] ?? [:]
         events = snapshot["events"] as? [[String: Any]] ?? []
+        for (side, slider) in paddingSliders where !slider.isTracking {
+            let value = editor["padding\(side)"] as? Double ?? Double(paddingDefaults[side]!)
+            slider.doubleValue = value
+            paddingValues[side]?.stringValue = "\(Int(value.rounded()))"
+        }
         mode.selectedSegment = editor["mode"] as? String == "month" ? 1 : 0
+        let savedPercent = Int(((editor["eventTextScale"] as? Double ?? 1) * 100).rounded())
+        if !eventTextSize.isTracking,
+            pendingEventTextPercent == nil || pendingEventTextPercent == savedPercent
+        {
+            pendingEventTextPercent = nil
+            eventTextSize.doubleValue = Double(savedPercent)
+            eventTextSizeValue.stringValue = "\(savedPercent)%"
+        }
+        updateRevertButtons()
         eventStyle.selectedSegment = editor["eventStyle"] as? String == "boxes" ? 1 : 0
         theme.selectedSegment =
             ["system": 0, "light": 1, "dark": 2][editor["theme"] as? String ?? "system"] ?? 0
@@ -553,8 +730,13 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         monthField.isHidden = mode.selectedSegment != 1
         showTitle.state = editor["showTitle"] as? Bool == true ? .on : .off
         rooms.state = editor["rooms"] as? Bool == true ? .on : .off
+        showTimeZone.state = editor["showTimeZone"] as? Bool == false ? .off : .on
+        showSnapshotDate.state = editor["showSnapshotDate"] as? Bool == false ? .off : .on
+        showCalendarLegend.state = editor["showCalendarLegend"] as? Bool == false ? .off : .on
+        showEventTimes.state = editor["showEventTimes"] as? Bool == false ? .off : .on
+        showWeekNumbers.state = editor["showWeekNumbers"] as? Bool == false ? .off : .on
+        highlightToday.state = editor["highlightToday"] as? Bool == false ? .off : .on
         includeWeekends.state = editor["includeWeekends"] as? Bool == true ? .on : .off
-        iconSpace.state = editor["iconSpace"] as? Bool == true ? .on : .off
         updateResolutionMenu()
         let included = snapshot["includedCount"] as? Int ?? 0
         summary.stringValue = "\(included) events included · \(events.count - included) excluded"
@@ -640,6 +822,21 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         case mode: patch["mode"] = mode.selectedSegment == 1 ? "month" : "module"
         case eventStyle:
             patch["eventStyle"] = eventStyle.selectedSegment == 1 ? "boxes" : "text"
+        case eventTextSize:
+            let percent = eventTextSize.doubleValue.rounded()
+            eventTextSizeValue.stringValue = "\(Int(percent))%"
+            updateRevertButtons()
+            // Update the label during tracking; render and save when the drag ends.
+            if eventTextSize.isTracking { return }
+            pendingEventTextPercent = Int(percent)
+            eventTextSize.doubleValue = percent
+            patch["eventTextScale"] = percent / 100
+        case resetEventTextSize:
+            pendingEventTextPercent = 100
+            eventTextSize.doubleValue = 100
+            eventTextSizeValue.stringValue = "100%"
+            updateRevertButtons()
+            patch["eventTextScale"] = 1.0
         case theme:
             switch theme.selectedSegment {
             case 1: patch["theme"] = "light"
@@ -670,8 +867,13 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         case month: patch["month"] = String(dateFormat.string(from: month.dateValue).prefix(7))
         case showTitle: patch["showTitle"] = showTitle.state == .on
         case rooms: patch["rooms"] = rooms.state == .on
+        case showTimeZone: patch["showTimeZone"] = showTimeZone.state == .on
+        case showSnapshotDate: patch["showSnapshotDate"] = showSnapshotDate.state == .on
+        case showCalendarLegend: patch["showCalendarLegend"] = showCalendarLegend.state == .on
+        case showEventTimes: patch["showEventTimes"] = showEventTimes.state == .on
+        case showWeekNumbers: patch["showWeekNumbers"] = showWeekNumbers.state == .on
+        case highlightToday: patch["highlightToday"] = highlightToday.state == .on
         case includeWeekends: patch["includeWeekends"] = includeWeekends.state == .on
-        case iconSpace: patch["iconSpace"] = iconSpace.state == .on
         default: break
         }
         if !patch.isEmpty { onChange?(patch) }
@@ -687,6 +889,31 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             accessibilityDescription: nil)
         appearanceToggle.setAccessibilityLabel(
             appearanceToggle.state == .on ? "Hide appearance options" : "Show appearance options")
+    }
+    @objc private func resetPadding(_ sender: NSButton) {
+        guard let side = paddingResetButtons.first(where: { $0.value === sender })?.key,
+            let slider = paddingSliders[side], let value = paddingDefaults[side]
+        else { return }
+        slider.doubleValue = Double(value)
+        changePadding(slider)
+    }
+    @objc private func changePadding(_ sender: EditorSlider) {
+        guard let side = paddingSliders.first(where: { $0.value === sender })?.key else { return }
+        let value = sender.doubleValue.rounded()
+        sender.doubleValue = value
+        paddingValues[side]?.stringValue = "\(Int(value))"
+        updateRevertButtons()
+        if sender.isTracking { return }
+        onChange?(["padding\(side)": value])
+    }
+    @objc func toggleMoreAppearance() {
+        moreAppearanceFields.isHidden = moreAppearanceToggle.state != .on
+        moreAppearanceToggle.image = NSImage(
+            systemSymbolName: moreAppearanceToggle.state == .on ? "chevron.down" : "chevron.right",
+            accessibilityDescription: nil)
+        moreAppearanceToggle.setAccessibilityLabel(
+            moreAppearanceToggle.state == .on
+                ? "Hide more appearance options" : "Show more appearance options")
     }
     @objc func exportPNG() {
         view.window?.makeFirstResponder(nil)

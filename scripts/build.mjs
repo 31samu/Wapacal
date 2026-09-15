@@ -30,7 +30,6 @@ const shared = {
   today,
   snapshotDate,
   rooms: true,
-  iconSpace: true,
 };
 await mkdir('output', { recursive: true });
 const reports = [];

@@ -309,8 +309,6 @@
           ><label class="check"><input type="checkbox" id="rooms" checked /> Show locations</label
           ><label class="check"
             ><input type="checkbox" id="weekends" /> Include Saturdays and Sundays</label
-          ><label class="check"
-            ><input type="checkbox" id="icon-space" checked /> Leave room for desktop icons</label
           >
         </fieldset>
         <div class="actions export-actions">
@@ -375,7 +373,6 @@
         showTitle: config.showTitle !== false,
         rooms: true,
         includeWeekends: config.includeWeekends === true,
-        iconSpace: true,
         today: data.today,
         snapshotDate: data.snapshotDate,
       };
@@ -659,7 +656,6 @@
         ['show-title', 'showTitle'],
         ['rooms', 'rooms'],
         ['weekends', 'includeWeekends'],
-        ['icon-space', 'iconSpace'],
       ].forEach(([id, key]) =>
         $(id).addEventListener('change', () => {
           state[key] = $(id).checked;
