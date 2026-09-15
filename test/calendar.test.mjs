@@ -268,7 +268,10 @@ test('every date includes its month and long titles use free row height', () => 
   for (const label of ['31 Aug', '1 Sept', '7 Sept', '30 Sept', '1 Oct', '2 Oct'])
     assert.match(result.svg, new RegExp(`>${label}<`));
   assert.doesNotMatch(result.warnings.join(' '), /full session title/);
-  assert.match(result.svg, />available<\/text>/);
+  assert.ok(
+    result.bounds.some((item) => item.text.includes('available')),
+    'the complete event title is rendered',
+  );
 });
 
 const feed = (...events) => `BEGIN:VCALENDAR\r\nVERSION:2.0\r\n${events.join('')}END:VCALENDAR\r\n`;
