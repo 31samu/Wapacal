@@ -683,6 +683,11 @@
             image.onerror = () => reject(new Error('Image export failed. Try SVG instead.'));
             image.src = url;
           });
+          if (typeof image.decode === 'function') {
+            try {
+              await image.decode();
+            } catch {}
+          }
           const canvas = document.createElement('canvas');
           canvas.width = image.naturalWidth;
           canvas.height = image.naturalHeight;

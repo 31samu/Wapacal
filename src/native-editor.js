@@ -256,6 +256,11 @@ async function pngBase64(svg) {
       image.onerror = () => reject(new Error('Could not render the wallpaper image.'));
       image.src = url;
     });
+    if (typeof image.decode === 'function') {
+      try {
+        await image.decode();
+      } catch {}
+    }
     const canvas = document.createElement('canvas');
     canvas.width = image.naturalWidth;
     canvas.height = image.naturalHeight;
