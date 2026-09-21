@@ -79,22 +79,36 @@ Task { @MainActor in
         let dayPicker = NSDatePicker()
         dayPicker.calendar = Calendar(identifier: .gregorian)
         dayPicker.timeZone = TimeZone(secondsFromGMT: 0)
-        let dayField = DayDateField(picker: dayPicker, title: "Test date")
+        let dayField = EditorDateField(picker: dayPicker, title: "Test date")
         let dayFormatter = DateFormatter()
         dayFormatter.calendar = dayPicker.calendar
         dayFormatter.timeZone = dayPicker.timeZone
         dayFormatter.dateFormat = "yyyy-MM-dd"
         for (from, button, expected) in [
-            ("2026-01-31", dayField.nextDay, "2026-02-01"),
-            ("2024-03-01", dayField.previousDay, "2024-02-29"),
-            ("2026-12-31", dayField.nextDay, "2027-01-01"),
+            ("2026-01-31", dayField.nextDate, "2026-02-01"),
+            ("2024-03-01", dayField.previousDate, "2024-02-29"),
+            ("2026-12-31", dayField.nextDate, "2027-01-01"),
         ] {
             dayPicker.dateValue = dayFormatter.date(from: from)!
-            dayField.stepDay(button)
+            dayField.stepDate(button)
             try require(
                 dayFormatter.string(from: dayPicker.dateValue) == expected,
                 "date arrows advance one day across calendar boundaries")
         }
+        let monthField = ui.month.superview as! EditorDateField
+        let originalMonth = ui.month.dateValue
+        try require(ui.month.datePickerElements == .yearMonth, "month picker hides the day")
+        for (from, button, expected) in [
+            ("2026-12-01", monthField.nextDate, "2027-01-01"),
+            ("2026-01-01", monthField.previousDate, "2025-12-01"),
+        ] {
+            ui.month.dateValue = dayFormatter.date(from: from)!
+            monthField.stepDate(button)
+            try require(
+                dayFormatter.string(from: ui.month.dateValue) == expected,
+                "month arrows advance one month across year boundaries")
+        }
+        ui.month.dateValue = originalMonth
         editorApp.showWallpaperSharingWarning(true)
         editorApp.window.contentView!.layoutSubtreeIfNeeded()
         try require(
@@ -192,20 +206,24 @@ Task { @MainActor in
                 "custom dimensions are saved under the display identity")
         }
         for index in NSScreen.screens.indices.reversed() {
+            let previousWidth = ui.editor["width"] as! Int
+            let previousHeight = ui.editor["height"] as! Int
             editorApp.screenPicker.selectItem(at: index)
             editorApp.changeScreen()
             while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
             let nativeSize = wallpaperPixelSize(NSScreen.screens[index])
             try require(ui.imageSizeField.isHidden, "monitor selection hides size controls")
+            let width = supportsImageSize(nativeSize) ? Int(nativeSize.width) : previousWidth
+            let height = supportsImageSize(nativeSize) ? Int(nativeSize.height) : previousHeight
             try require(
-                ui.editor["width"] as? Int == Int(nativeSize.width),
-                "switching back uses the display's native resolution")
+                ui.editor["width"] as? Int == width && ui.editor["height"] as? Int == height,
+                "switching back uses supported display dimensions or preserves the current size: expected \(String(describing: width)) × \(String(describing: height)), got \(String(describing: ui.editor["width"])) × \(String(describing: ui.editor["height"]))"
+            )
             if wallpaperEnabled {
                 try require(
-                    ui.preview.image?.representations.first?.pixelsWide == Int(nativeSize.width)
-                        && ui.preview.image?.representations.first?.pixelsHigh
-                            == Int(nativeSize.height),
-                    "switching back rerenders the preview at the native size")
+                    ui.preview.image?.representations.first?.pixelsWide == width
+                        && ui.preview.image?.representations.first?.pixelsHigh == height,
+                    "switching back keeps the preview at the expected image size")
             }
             ui.displayResolution.performClick(nil)
             while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
@@ -214,6 +232,9 @@ Task { @MainActor in
             "return window.nativeUpdate(patch)", ["patch": ["width": 2880, "height": 1800]])
         editorApp.screenPicker.selectItem(withTitle: "All connected displays")
         editorApp.changeScreen()
+        while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
+        let allDisplaysWidth = ui.editor["width"] as? Int
+        let allDisplaysHeight = ui.editor["height"] as? Int
         let targets = try editorApp.targetScreens()
         try require(targets.count == NSScreen.screens.count, "all displays selected")
         try require(!ui.displayResolution.isEnabled, "all displays use their own size")
@@ -277,32 +298,39 @@ Task { @MainActor in
         }!
         let previewSize = wallpaperPixelSize(previewScreen)
         try require(
-            ui.editor["width"] as? Int == Int(previewSize.width)
-                && ui.editor["height"] as? Int == Int(previewSize.height),
+            ui.editor["width"] as? Int
+                == (supportsImageSize(previewSize) ? Int(previewSize.width) : allDisplaysWidth)
+                && ui.editor["height"] as? Int
+                    == (supportsImageSize(previewSize)
+                        ? Int(previewSize.height) : allDisplaysHeight),
             "per-display renders preserve the selected preview size")
-        for (index, screen) in NSScreen.screens.enumerated() {
+        for screen in NSScreen.screens {
+            let previousWidth = ui.editor["width"] as! Int
+            let previousHeight = ui.editor["height"] as! Int
             editorApp.screenPicker.selectItem(
                 at: editorApp.screenPicker.itemArray.firstIndex {
                     $0.representedObject as? String == screenID(screen)
                 }!)
             editorApp.changeScreen()
+            let size = wallpaperPixelSize(screen)
             try require(
-                editorApp.pendingEdits > 0, "leaving all displays queues sizing before Apply")
+                (editorApp.pendingEdits > 0) == supportsImageSize(size),
+                "display selection queues sizing only for supported image dimensions")
             while editorApp.pendingEdits > 0 {
                 try await Task.sleep(nanoseconds: 50_000_000)
             }
-            let size = wallpaperPixelSize(screen)
-            let width = supportsImageSize(size) ? Int(size.width) : 2560 + index * 128
-            let height = supportsImageSize(size) ? Int(size.height) : 1440
+            let width = supportsImageSize(size) ? Int(size.width) : previousWidth
+            let height = supportsImageSize(size) ? Int(size.height) : previousHeight
             try require(
                 ui.editor["width"] as? Int == width && ui.editor["height"] as? Int == height,
-                "leaving all displays restores saved size: expected \(width) × \(height), got \(String(describing: ui.editor["width"])) × \(String(describing: ui.editor["height"]))"
+                "display selection uses supported dimensions or preserves the current size: expected \(width) × \(height), got \(String(describing: ui.editor["width"])) × \(String(describing: ui.editor["height"]))"
             )
             try require(
                 ui.resolution.titleOfSelectedItem == "\(width) × \(height)",
                 "selected screen size is reflected in the size menu")
             editorApp.screenPicker.selectItem(withTitle: "All connected displays")
             editorApp.changeScreen()
+            while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
         }
         _ = try await editorApp.js(
             "return window.nativeUpdate(patch)", ["patch": ["width": 2880, "height": 1800]])

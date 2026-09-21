@@ -1,12 +1,15 @@
 import AppKit
 
-final class DayDateField: NSView {
+final class EditorDateField: NSView {
     let picker: NSDatePicker
-    let previousDay = NSButton()
-    let nextDay = NSButton()
+    private let stepComponent: Calendar.Component
+    let previousDate = NSButton()
+    let nextDate = NSButton()
 
     init(picker: NSDatePicker, title: String) {
         self.picker = picker
+        let unit = picker.datePickerElements == .yearMonth ? "month" : "day"
+        stepComponent = picker.datePickerElements == .yearMonth ? .month : .day
         super.init(frame: .zero)
         picker.datePickerStyle = .textField
         picker.isBezeled = false
@@ -14,8 +17,8 @@ final class DayDateField: NSView {
         picker.drawsBackground = false
         picker.setAccessibilityLabel(title)
         for (button, symbol, description) in [
-            (previousDay, "chevron.down", "Previous day"),
-            (nextDay, "chevron.up", "Next day"),
+            (previousDate, "chevron.down", "Previous \(unit)"),
+            (nextDate, "chevron.up", "Next \(unit)"),
         ] {
             button.image = NSImage(
                 systemSymbolName: symbol, accessibilityDescription: description
@@ -24,10 +27,10 @@ final class DayDateField: NSView {
             button.isBordered = false
             button.controlSize = .small
             button.target = self
-            button.action = #selector(stepDay(_:))
+            button.action = #selector(stepDate(_:))
             button.setAccessibilityLabel("\(description) for \(title.lowercased())")
         }
-        for control in [picker, previousDay, nextDay] {
+        for control in [picker, previousDate, nextDate] {
             addSubview(control)
             control.translatesAutoresizingMaskIntoConstraints = false
         }
@@ -35,14 +38,14 @@ final class DayDateField: NSView {
             heightAnchor.constraint(equalToConstant: 24),
             picker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             picker.centerYAnchor.constraint(equalTo: centerYAnchor),
-            previousDay.leadingAnchor.constraint(equalTo: picker.trailingAnchor, constant: 3),
-            previousDay.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            previousDay.topAnchor.constraint(equalTo: centerYAnchor),
-            previousDay.heightAnchor.constraint(equalToConstant: 11),
-            nextDay.leadingAnchor.constraint(equalTo: previousDay.leadingAnchor),
-            nextDay.trailingAnchor.constraint(equalTo: previousDay.trailingAnchor),
-            nextDay.bottomAnchor.constraint(equalTo: centerYAnchor),
-            nextDay.heightAnchor.constraint(equalToConstant: 11),
+            previousDate.leadingAnchor.constraint(equalTo: picker.trailingAnchor, constant: 3),
+            previousDate.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            previousDate.topAnchor.constraint(equalTo: centerYAnchor),
+            previousDate.heightAnchor.constraint(equalToConstant: 11),
+            nextDate.leadingAnchor.constraint(equalTo: previousDate.leadingAnchor),
+            nextDate.trailingAnchor.constraint(equalTo: previousDate.trailingAnchor),
+            nextDate.bottomAnchor.constraint(equalTo: centerYAnchor),
+            nextDate.heightAnchor.constraint(equalToConstant: 11),
         ])
     }
 
@@ -53,12 +56,13 @@ final class DayDateField: NSView {
         NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
     }
 
-    @objc func stepDay(_ sender: NSButton) {
+    @objc func stepDate(_ sender: NSButton) {
         guard picker.isEnabled else { return }
-        let days = sender === nextDay ? 1 : -1
+        let amount = sender === nextDate ? 1 : -1
         var calendar = picker.calendar ?? Calendar(identifier: .gregorian)
         calendar.timeZone = picker.timeZone ?? TimeZone(secondsFromGMT: 0)!
-        guard let date = calendar.date(byAdding: .day, value: days, to: picker.dateValue) else {
+        guard let date = calendar.date(byAdding: stepComponent, value: amount, to: picker.dateValue)
+        else {
             return
         }
         picker.dateValue = date
@@ -394,19 +398,19 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             control.target = self
             control.action = #selector(changeControl(_:))
         }
-        for picker in [start, end] {
+        for picker in [start, end, month] {
             picker.controlSize = .regular
             picker.font = .systemFont(ofSize: NSFont.systemFontSize)
         }
         let dateRange = Self.stack(
             [
-                field("First day", DayDateField(picker: start, title: "First day")),
-                field("Last day", DayDateField(picker: end, title: "Last day")),
+                field("First day", EditorDateField(picker: start, title: "First day")),
+                field("Last day", EditorDateField(picker: end, title: "Last day")),
             ],
             vertical: false, spacing: 8)
         dateRange.distribution = .fillEqually
         moduleFields = Self.stack([field("Module name", name), dateRange])
-        monthField = field("Month", month)
+        monthField = field("Month", EditorDateField(picker: month, title: "Month"))
         exportMenu.addItem(withTitle: "Export")
         for (title, action) in [
             ("PNG · Current appearance…", #selector(exportPNG)),
@@ -754,9 +758,9 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             showCalendarLegend, showEventTimes, highlightToday,
             includeWeekends, exportMenu,
         ] { control.isEnabled = ready }
-        for picker in [start, end] {
-            (picker.superview as? DayDateField)?.previousDay.isEnabled = ready
-            (picker.superview as? DayDateField)?.nextDay.isEnabled = ready
+        for picker in [start, end, month] {
+            (picker.superview as? EditorDateField)?.previousDate.isEnabled = ready
+            (picker.superview as? EditorDateField)?.nextDate.isEnabled = ready
         }
         for well in colorWells.values { well.isEnabled = ready }
         for slider in paddingSliders.values { slider.isEnabled = ready }
