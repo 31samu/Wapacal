@@ -113,6 +113,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     private var pendingSourceSaves = 0
     let refreshPicker = NSPopUpButton()
     let screenPicker = NSPopUpButton()
+    let applyButton = NSButton(title: "Apply wallpaper", target: nil, action: nil)
     let automatic = NSButton(
         checkboxWithTitle: "Update automatically while running", target: nil, action: nil)
     let login = NSButton(checkboxWithTitle: "Open at login", target: nil, action: nil)
@@ -288,7 +289,9 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         _ = editorView.view
         screenPicker.setAccessibilityLabel("Wallpaper display")
         screenPicker.widthAnchor.constraint(lessThanOrEqualToConstant: 260).isActive = true
-        let apply = NSButton(title: "Apply wallpaper", target: self, action: #selector(applyNow))
+        let apply = applyButton
+        apply.target = self
+        apply.action = #selector(applyNow)
         apply.bezelStyle = .rounded
         for (identifier, label, control) in [
             ("display", "Display", screenPicker),
@@ -415,6 +418,8 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         screenPicker.action = #selector(changeScreen)
         editorView.displayResolution.target = self
         editorView.displayResolution.action = #selector(useDisplayResolution)
+        editorView.previewResolution.target = self
+        editorView.previewResolution.action = #selector(changePreviewResolution)
         updateScreens()
         escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard event.keyCode == 53, let window = self?.window, NSApp.keyWindow === window else {
@@ -445,6 +450,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 ready = true
                 editorView.setReady(true)
                 updateDisplayResolution()
+                if !customResolution && !allDisplays { useDisplayResolution() }
                 persist()
                 status.stringValue = "Saved calendar loaded. Your edits are saved automatically."
                 tick()
@@ -827,14 +833,19 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         }
         screenPicker.addItem(withTitle: "All connected displays")
         screenPicker.lastItem?.representedObject = "all"
-        if previous == "all" {
-            screenPicker.selectItem(at: screenPicker.numberOfItems - 1)
+        screenPicker.addItem(withTitle: "Custom resolution")
+        screenPicker.lastItem?.representedObject = "custom"
+        if previous == "all" || previous == "custom" {
+            screenPicker.selectItem(at: screenPicker.itemArray.firstIndex {
+                $0.representedObject as? String == previous
+            }!)
         } else if let index = NSScreen.screens.firstIndex(where: { screenID($0) == previous }) {
             screenPicker.selectItem(at: index)
         } else if previous != nil {
             screenPicker.select(nil)
         }
         updateDisplayResolution()
+        if ready, !customResolution, !allDisplays { useDisplayResolution() }
         if ready, previous != nil, (!wasConnected || previous == "all"),
             screenPicker.selectedItem != nil
         {
@@ -860,8 +871,12 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         persist()
         updateDisplayResolution()
         guard ready, let selection = saved["screen"] as? String else { return }
-        var dimensions = sizes[selection]
-        if dimensions == nil, let screen = try? targetScreen() {
+        if selection == "all" {
+            changePreviewResolution()
+            return
+        }
+        var dimensions = customResolution ? sizes[selection] : nil
+        if !customResolution, let screen = try? targetScreen() {
             let size = wallpaperPixelSize(screen)
             dimensions = ["width": Int(size.width), "height": Int(size.height)]
         }
@@ -872,26 +887,40 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         }
     }
     var allDisplays: Bool { saved["screen"] as? String == "all" }
+    var customResolution: Bool { saved["screen"] as? String == "custom" }
     func updateDisplayResolution() {
         let button = editorView.displayResolution
         let resolution = editorView.resolution
-        button.isHidden = allDisplays
-        editorView.displaySizes.isHidden = !allDisplays
+        button.isHidden = true
+        editorView.imageSizeField.isHidden = !customResolution
+        applyButton.isEnabled = ready && !customResolution
+        applyButton.toolTip = customResolution ? "Choose a display to apply wallpaper." : nil
+        editorView.previewResolution.isHidden = !allDisplays
+        editorView.previewResolutionField.isHidden = !allDisplays
         if allDisplays {
             resolution.removeAllItems()
             resolution.addItem(withTitle: "Use screen sizes")
             resolution.selectItem(at: 0)
             resolution.isEnabled = false
-            let sizes = NSScreen.screens.map { screen in
+            editorView.previewResolution.removeAllItems()
+            for screen in NSScreen.screens {
                 let size = wallpaperPixelSize(screen)
-                return "\(screen.localizedName): \(Int(size.width)) × \(Int(size.height))"
+                editorView.previewResolution.addItem(
+                    withTitle: "\(screen.localizedName) · \(Int(size.width)) × \(Int(size.height))")
+                editorView.previewResolution.lastItem?.representedObject = screenID(screen)
             }
-            var notes = [sizes.joined(separator: "\n")]
-            if wallpaperSharesAllSpacesAndDisplays() {
-                notes.append(
-                    "Turn off macOS's “Show on all Spaces” setting to use separate display sizes.")
+            let savedSize = (saved["displaySizes"] as? [String: [String: Int]])?["all"]
+            let width = savedSize?["width"] ?? editorView.editor["width"] as? Int
+            let height = savedSize?["height"] ?? editorView.editor["height"] as? Int
+            if let index = NSScreen.screens.firstIndex(where: {
+                let size = wallpaperPixelSize($0)
+                return Int(size.width) == width && Int(size.height) == height
+            }) {
+                editorView.previewResolution.selectItem(at: index)
+            } else {
+                editorView.previewResolution.selectItem(at: 0)
             }
-            editorView.displaySizes.stringValue = notes.joined(separator: "\n\n")
+            editorView.previewResolution.isEnabled = ready && !NSScreen.screens.isEmpty
             button.isEnabled = false
             return
         }
@@ -921,7 +950,20 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             return
         }
         window?.makeFirstResponder(nil)
-        editorView.onChange?(["width": Int(size.width), "height": Int(size.height)])
+        queueEditorPatch(
+            ["width": Int(size.width), "height": Int(size.height)], automaticApply: false)
+    }
+    @objc func changePreviewResolution() {
+        guard ready, allDisplays,
+            let id = editorView.previewResolution.selectedItem?.representedObject as? String,
+            let screen = NSScreen.screens.first(where: { screenID($0) == id })
+        else { return }
+        let size = wallpaperPixelSize(screen)
+        guard size.width >= 1280, size.height >= 720, size.width <= 7680, size.height <= 4320
+        else { return }
+        window?.makeFirstResponder(nil)
+        queueEditorPatch(
+            ["width": Int(size.width), "height": Int(size.height)], automaticApply: false)
     }
     @objc func changeRefreshInterval() {
         saved["refreshInterval"] = refreshPicker.selectedItem?.representedObject as? Double ?? 3600
@@ -1787,6 +1829,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         }
     }
     @objc func applyNow() {
+        guard !customResolution else { return }
         window?.makeFirstResponder(nil)
         let pendingSave = sourceSaveTask
         Task { @MainActor in
@@ -1797,7 +1840,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     func makeAndApply(force: Bool) async {
         refreshWallpaperSharingWarning()
         while pendingEdits > 0 { try? await Task.sleep(nanoseconds: 50_000_000) }
-        guard ready, lastEditorError == nil else { return }
+        guard ready, !customResolution, lastEditorError == nil else { return }
         if rendering {
             rerender = true
             return
@@ -1831,8 +1874,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                         throw WallpaperError.invalid("Resolution exceeds 7680 × 4320.")
                     }
                     let dimensions: [String: Any] =
-                        allDisplays
-                        ? ["width": Int(size.width), "height": Int(size.height)] : [:]
+                        ["width": Int(size.width), "height": Int(size.height)]
                     guard
                         let pair = try await js(
                             "return await window.nativePair(size)", ["size": dimensions],

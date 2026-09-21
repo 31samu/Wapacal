@@ -179,7 +179,7 @@ private final class JoinedResolutionControls: NSStackView {
         NSColor.separatorColor.setStroke()
         outline.lineWidth = 0.5
         outline.stroke()
-        if let button = arrangedSubviews.last, !button.isHidden {
+        if arrangedSubviews.count > 1, let button = arrangedSubviews.last, !button.isHidden {
             NSColor.separatorColor.setFill()
             NSRect(x: button.frame.minX, y: 4, width: 1, height: bounds.height - 8).fill()
         }
@@ -247,7 +247,9 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     private let customWidth = NSTextField()
     private let customHeight = NSTextField()
     let displayResolution = NSButton(title: "Use display resolution", target: nil, action: nil)
-    let displaySizes = NSTextField(wrappingLabelWithString: "")
+    let previewResolution = NSPopUpButton()
+    private(set) var previewResolutionField: NSStackView!
+    private(set) var imageSizeField: NSStackView!
     let name = NSTextField()
     let start = NSDatePicker()
     let end = NSDatePicker()
@@ -417,9 +419,8 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             exportMenu.menu?.addItem(item)
         }
         exportMenu.setAccessibilityLabel("Export wallpaper")
-        displaySizes.font = .systemFont(ofSize: 11)
-        displaySizes.textColor = .secondaryLabelColor
-        displaySizes.isHidden = true
+        previewResolution.isHidden = true
+        previewResolution.setAccessibilityLabel("Preview image size")
         let lightHeading = NSTextField(labelWithString: "Light")
         let darkHeading = NSTextField(labelWithString: "Dark")
         for heading in [lightHeading, darkHeading] {
@@ -459,7 +460,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         customColorFields = Self.stack([colorGrid])
         colorGrid.widthAnchor.constraint(equalTo: customColorFields.widthAnchor).isActive = true
         customColorFields.isHidden = true
-        for control: NSControl in [resolution, displayResolution] {
+        for control: NSControl in [resolution, displayResolution, previewResolution] {
             control.controlSize = .small
             control.font = .systemFont(ofSize: NSFont.systemFontSize)
             control.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -474,8 +475,16 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         resolutionRow.distribution = .fillEqually
         resolutionRow.spacing = 0
         resolutionRow.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
-        let imageSizeFields = Self.stack([resolutionRow, displaySizes], spacing: 6)
-        resolutionRow.widthAnchor.constraint(equalTo: imageSizeFields.widthAnchor).isActive = true
+        previewResolution.isBordered = false
+        let previewResolutionRow = JoinedResolutionControls(views: [previewResolution])
+        previewResolutionRow.orientation = .horizontal
+        previewResolutionRow.alignment = .centerY
+        previewResolutionRow.distribution = .fillEqually
+        previewResolutionRow.spacing = 0
+        previewResolutionRow.edgeInsets = resolutionRow.edgeInsets
+        previewResolutionField = field("Preview resolution", previewResolutionRow)
+        previewResolutionField.isHidden = true
+        previewResolution.setAccessibilityLabel("Preview resolution")
         let colorThemeRow = Self.stack([colorTheme, calendarColors], vertical: false, spacing: 6)
         colorTheme.setAccessibilityLabel("Color theme")
         calendarColors.setContentHuggingPriority(.required, for: .horizontal)
@@ -532,9 +541,10 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         moreAppearanceToggle.target = self
         moreAppearanceToggle.action = #selector(toggleMoreAppearance)
         moreAppearanceToggle.setAccessibilityLabel("Show more appearance options")
+        imageSizeField = field("Image size", resolutionRow)
         appearanceFields = Self.stack(
             [
-                field("Image size", imageSizeFields),
+                imageSizeField!, previewResolutionField!,
                 field("Preview appearance", theme),
                 field("Color theme", colorThemeRow),
                 customColorFields!,
@@ -547,7 +557,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
                 moreAppearanceToggle, moreAppearanceFields!,
             ], spacing: 14)
         appearanceFields.isHidden = true
-        displaySizes.widthAnchor.constraint(equalTo: resolutionRow.widthAnchor).isActive = true
+        previewResolutionField.widthAnchor.constraint(equalTo: appearanceFields.widthAnchor).isActive = true
         appearanceToggle.setButtonType(.onOff)
         appearanceToggle.isBordered = false
         appearanceToggle.image = NSImage(
@@ -737,7 +747,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     func setReady(_ ready: Bool) {
         for control: NSControl in [
             mode, theme, colorTheme, calendarColors, eventStyle, eventTextSize,
-            resolution, name,
+            resolution, previewResolution, name,
             start,
             end, month, showTitle, rooms, showTimeZone, showWeekNumbers, showSnapshotDate,
             showCalendarLegend, showEventTimes, highlightToday,

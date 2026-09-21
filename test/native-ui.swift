@@ -118,7 +118,13 @@ Task { @MainActor in
         try require(
             !descendants(editorApp.window.contentView!).contains { $0 is WKWebView },
             "web view in window hierarchy")
-        try require(ui.preview.image != nil, "native image preview")
+        let previewDeadline = Date().addingTimeInterval(15)
+        while ui.preview.image == nil && Date() < previewDeadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try require(
+            ui.preview.image != nil,
+            "native image preview: \(editorApp.lastEditorError ?? editorApp.status.stringValue)")
         try require(ui.table.numberOfRows > 0, "event rows")
         try require(ui.name.stringValue == "Prototype module", "saved module name")
         try require(ui.resolution.titleOfSelectedItem == "2880 × 1800", "custom saved image size")
@@ -182,13 +188,15 @@ Task { @MainActor in
             editorApp.screenPicker.selectItem(at: index)
             editorApp.changeScreen()
             while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
+            let nativeSize = wallpaperPixelSize(NSScreen.screens[index])
+            try require(ui.imageSizeField.isHidden, "monitor selection hides size controls")
             try require(
-                ui.editor["width"] as? Int == 2560 + index * 128,
-                "switching back restores that display's custom resolution")
+                ui.editor["width"] as? Int == Int(nativeSize.width),
+                "switching back uses the display's native resolution")
             try require(
-                ui.preview.image?.representations.first?.pixelsWide == 2560 + index * 128
-                    && ui.preview.image?.representations.first?.pixelsHigh == 1440,
-                "switching back rerenders the preview at that display's saved size")
+                ui.preview.image?.representations.first?.pixelsWide == Int(nativeSize.width)
+                    && ui.preview.image?.representations.first?.pixelsHigh == Int(nativeSize.height),
+                "switching back rerenders the preview at the native size")
             ui.displayResolution.performClick(nil)
             while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
         }
@@ -203,14 +211,19 @@ Task { @MainActor in
             ui.resolution.titleOfSelectedItem == "Use screen sizes" && !ui.resolution.isEnabled,
             "all displays show screen sizing instead of one numeric resolution")
         try require(
-            ui.displayResolution.isHidden && !ui.displaySizes.isHidden,
-            "all displays show the per-screen size explanation")
+            ui.displayResolution.isHidden && !ui.previewResolution.isHidden,
+            "all displays show the preview size menu")
+        try require(
+            ui.previewResolution.numberOfItems == NSScreen.screens.count,
+            "preview size menu has one option per screen")
         for screen in try editorApp.targetScreens() {
             let size = wallpaperPixelSize(screen)
             try require(
-                ui.displaySizes.stringValue.contains(
-                    "\(screen.localizedName): \(Int(size.width)) × \(Int(size.height))"),
-                "each screen's size is visible")
+                ui.previewResolution.itemArray.contains {
+                    $0.title
+                        == "\(screen.localizedName) · \(Int(size.width)) × \(Int(size.height))"
+                },
+                "each screen's size is available for the preview")
             if !supportsImageSize(size) {
                 let error =
                     try await editorApp.js(
@@ -237,9 +250,26 @@ Task { @MainActor in
                     "per-display \(theme) render dimensions")
             }
         }
+        if let last = NSScreen.screens.last(where: { supportsImageSize(wallpaperPixelSize($0)) }) {
+            ui.previewResolution.selectItem(
+                at: NSScreen.screens.firstIndex(where: { screenID($0) == screenID(last) })!)
+            editorApp.changePreviewResolution()
+            while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
+            let size = wallpaperPixelSize(last)
+            try require(
+                ui.editor["width"] as? Int == Int(size.width)
+                    && ui.editor["height"] as? Int == Int(size.height),
+                "preview size menu rerenders at the selected screen size")
+        }
+        let previewScreen = NSScreen.screens.first {
+            screenID($0)
+                == (ui.previewResolution.selectedItem?.representedObject as? String)
+        }!
+        let previewSize = wallpaperPixelSize(previewScreen)
         try require(
-            ui.editor["width"] as? Int == 2880 && ui.editor["height"] as? Int == 1800,
-            "per-display render preserves editor size")
+            ui.editor["width"] as? Int == Int(previewSize.width)
+                && ui.editor["height"] as? Int == Int(previewSize.height),
+            "per-display renders preserve the selected preview size")
         for (index, screen) in NSScreen.screens.enumerated() {
             editorApp.screenPicker.selectItem(
                 at: editorApp.screenPicker.itemArray.firstIndex {
@@ -351,7 +381,7 @@ Task { @MainActor in
                             == originals[screens.firstIndex(of: $0)!].url?.standardizedFileURL
                     },
                     "changing the target display does not apply a wallpaper automatically")
-                editorApp.useDisplayResolution()
+                editorApp.queueEditorPatch(["showTitle": true])
                 let applyDeadline = Date().addingTimeInterval(15)
                 var didApply = false
                 while Date() < applyDeadline {
@@ -403,13 +433,18 @@ Task { @MainActor in
         try require(
             editorApp.screenPicker.titleOfSelectedItem == "All connected displays",
             "all displays selection survives display refresh")
-        editorApp.saved["screen"] = initialScreen
+        editorApp.saved["screen"] = "custom"
         editorApp.updateScreens()
         try require(
             ui.resolution.titleOfSelectedItem == "2880 × 1800" && ui.resolution.isEnabled,
-            "returning to one display restores the custom size control")
+            "custom resolution mode shows the size control")
+        try require(!editorApp.applyButton.isEnabled, "custom resolution disables Apply")
+        try require(ui.exportMenu.isEnabled, "custom resolution keeps Export available")
+        try require(!ui.imageSizeField.isHidden, "custom resolution shows image size")
+        await editorApp.makeAndApply(force: true)
+        try require(!editorApp.rendering, "custom resolution does not apply wallpaper")
         try require(ui.resolution.item(withTitle: "Custom…") != nil, "custom size menu option")
-        editorApp.saved["screen"] = screenID(NSScreen.screens[0])
+        editorApp.saved["screen"] = "custom"
         editorApp.updateScreens()
         for accept in [false, true] {
             ui.resolution.selectItem(withTitle: "Custom…")
@@ -447,8 +482,8 @@ Task { @MainActor in
         }
         try require(
             (editorApp.saved["displaySizes"] as? [String: [String: Int]])?[
-                screenID(NSScreen.screens[0])] == ["width": 3200, "height": 2000],
-            "custom menu size is remembered for the selected display")
+                "custom"] == ["width": 3200, "height": 2000],
+            "custom resolution is remembered independently of displays")
         editorApp.queueEditorPatch(["width": 2880, "height": 1800], automaticApply: false)
         while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
         try require(ui.showTitle.state == .off, "legacy title default")

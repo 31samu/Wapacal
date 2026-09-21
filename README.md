@@ -66,7 +66,7 @@ In **Settings → Calendars**, choose an **Event color** for each calendar. Chan
 
 Click **Apply wallpaper** to use it on the selected display, or **Export** to save an image. Settings also offers automatic updates and launch at login. Closing the window keeps Wapacal running in the menu bar; choose **Quit** there to stop it.
 
-For one display, open **Appearance** and use the suggested pixel dimensions below **Image size**. Choose **All connected displays** to render the calendar separately at each display's resolution. Image size then shows **Use screen sizes** and lists each screen's dimensions; the preview and exports retain their previous size. Each display remembers its chosen image size. Switching displays restores that size and updates the preview; a display without a saved size starts at its own resolution. Selecting a display does not apply a wallpaper. Automatic updates also handle calendar and display changes while Wapacal is running. Restore applies to the selected display or all currently connected displays. Turn off macOS's **Show on all Spaces** setting to use separate wallpapers per display.
+For one display, open **Appearance** and use the suggested pixel dimensions below **Image size**. Choose **All connected displays** to render the calendar separately at each display's resolution. Image size then shows **Use screen sizes** and a second menu for choosing which screen size the preview and manual exports use. Each display remembers its chosen image size. Switching displays restores that size and updates the preview; a display without a saved size starts at its own resolution. Selecting a display does not apply a wallpaper. Automatic updates also handle calendar and display changes while Wapacal is running. Restore applies to the selected display or all currently connected displays. Turn off macOS's **Show on all Spaces** setting to use separate wallpapers per display.
 
 From the menu bar, you can reopen Wapacal, change settings, refresh and apply the wallpaper, or quit the app.
 
@@ -83,6 +83,7 @@ Your settings and cached calendars stay on your Mac under `~/Library/Application
 - Applying and restoring wallpapers has been tested with a built-in Retina screen and a 4K external display. Physical disconnect/reconnect, inactive Spaces, and older macOS versions still need live testing. The all-display option targets connected screens; it does not control macOS's “Show on all Spaces” setting. Restoring Apple's dynamic or aerial wallpaper settings is not guaranteed.
 - Calendar and event identifiers can change when accounts are removed or fully resynced. Wapacal reports missing calendars instead of guessing a replacement by name. Reselect the calendar in Settings and remove the unavailable entry; event choices may need to be made again. Local snapshots are limited to 100,000 events per calendar in the requested range.
 - EventKit permission and calendar discovery have been tested manually on current macOS. macOS 13 and provider-specific recurrence behavior still need live testing. Automated tests use a fake provider and do not read personal calendars.
+- Multi-Monitor support only covers all connected monitors, having two monitors update and not another isn't possible at the moment.
 
 ## Development
 
