@@ -557,7 +557,8 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
                 moreAppearanceToggle, moreAppearanceFields!,
             ], spacing: 14)
         appearanceFields.isHidden = true
-        previewResolutionField.widthAnchor.constraint(equalTo: appearanceFields.widthAnchor).isActive = true
+        previewResolutionField.widthAnchor.constraint(equalTo: appearanceFields.widthAnchor)
+            .isActive = true
         appearanceToggle.setButtonType(.onOff)
         appearanceToggle.isBordered = false
         appearanceToggle.image = NSImage(

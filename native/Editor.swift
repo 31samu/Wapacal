@@ -836,9 +836,10 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         screenPicker.addItem(withTitle: "Custom resolution")
         screenPicker.lastItem?.representedObject = "custom"
         if previous == "all" || previous == "custom" {
-            screenPicker.selectItem(at: screenPicker.itemArray.firstIndex {
-                $0.representedObject as? String == previous
-            }!)
+            screenPicker.selectItem(
+                at: screenPicker.itemArray.firstIndex {
+                    $0.representedObject as? String == previous
+                }!)
         } else if let index = NSScreen.screens.firstIndex(where: { screenID($0) == previous }) {
             screenPicker.selectItem(at: index)
         } else if previous != nil {

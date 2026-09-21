@@ -195,7 +195,8 @@ Task { @MainActor in
                 "switching back uses the display's native resolution")
             try require(
                 ui.preview.image?.representations.first?.pixelsWide == Int(nativeSize.width)
-                    && ui.preview.image?.representations.first?.pixelsHigh == Int(nativeSize.height),
+                    && ui.preview.image?.representations.first?.pixelsHigh
+                        == Int(nativeSize.height),
                 "switching back rerenders the preview at the native size")
             ui.displayResolution.performClick(nil)
             while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
