@@ -76,6 +76,25 @@ Task { @MainActor in
             )
         }
         let ui = editorApp.editorView
+        let dayPicker = NSDatePicker()
+        dayPicker.calendar = Calendar(identifier: .gregorian)
+        dayPicker.timeZone = TimeZone(secondsFromGMT: 0)
+        let dayField = DayDateField(picker: dayPicker, title: "Test date")
+        let dayFormatter = DateFormatter()
+        dayFormatter.calendar = dayPicker.calendar
+        dayFormatter.timeZone = dayPicker.timeZone
+        dayFormatter.dateFormat = "yyyy-MM-dd"
+        for (from, button, expected) in [
+            ("2026-01-31", dayField.nextDay, "2026-02-01"),
+            ("2024-03-01", dayField.previousDay, "2024-02-29"),
+            ("2026-12-31", dayField.nextDay, "2027-01-01"),
+        ] {
+            dayPicker.dateValue = dayFormatter.date(from: from)!
+            dayField.stepDay(button)
+            try require(
+                dayFormatter.string(from: dayPicker.dateValue) == expected,
+                "date arrows advance one day across calendar boundaries")
+        }
         editorApp.showWallpaperSharingWarning(true)
         editorApp.window.contentView!.layoutSubtreeIfNeeded()
         try require(
@@ -480,10 +499,10 @@ Task { @MainActor in
         try require(NSApp.activationPolicy() == .accessory, "closing About returns to menu bar")
         editorApp.show()
         try require(
-            editorApp.statusMenu!.items.map { $0.title } == [
+            editorApp.item.menu!.items.map { $0.title } == [
                 "Open Wapacal", "Settings…", "Refresh & Apply", "Quit",
             ]
-                && editorApp.statusMenu!.items[2].action
+                && editorApp.item.menu!.items[2].action
                     == #selector(editorApp.refreshAndApplyNow),
             "compact menu bar refresh-and-apply action")
         let calendarMenu = mainMenu.items.first { $0.title == "Calendar" }!.submenu!
@@ -542,10 +561,10 @@ Task { @MainActor in
         _ = try await editorApp.js("return window.nativeUpdate({theme: 'light'});")
         print("System appearance checks passed")
 
-        // Settings reuse the original controls and state in a separate native window.
+        // Calendar controls live in the sidebar; general settings use a separate window.
         try require(
-            editorApp.urlField.window === editorApp.settingsWindow,
-            "subscription field belongs to Settings")
+            editorApp.urlField.window === editorApp.window,
+            "subscription field belongs to the sidebar")
         try require(!editorApp.settingsWindow.isVisible, "Settings stays closed at startup")
         let settingsItem = NSApp.mainMenu!.items[0].submenu!.items.first { $0.title == "Settings…" }
         try require(settingsItem?.keyEquivalent == ",", "standard Settings shortcut")
@@ -555,16 +574,56 @@ Task { @MainActor in
         try require(
             !descendants(editorApp.settingsWindow.contentView!).contains { $0 is WKWebView },
             "native Settings")
-        try require(editorApp.urlField.frame.width > 450, "readable subscription URL field")
-        let settingsRoot = editorApp.settingsWindow.contentView!
-        let saveBounds = editorApp.saveSourceButton.convert(
-            editorApp.saveSourceButton.bounds, to: settingsRoot)
-        let statusBounds = editorApp.settingsStatus.convert(
-            editorApp.settingsStatus.bounds, to: settingsRoot)
-        try require(settingsRoot.bounds.contains(saveBounds), "save button inside Settings")
-        try require(!saveBounds.intersects(statusBounds), "save button does not overlap status")
+        let warningSnapshot =
+            try await editorApp.js("return window.nativeSnapshot()", updates: false)
+            as! [String: Any]
+        var warningFixture = warningSnapshot
+        warningFixture["warnings"] = ["Full location is in the preview."]
+        ui.display(warningFixture)
+        ui.view.layoutSubtreeIfNeeded()
+        let layoutWarnings = ui.warning.enclosingScrollView!
         try require(
-            !descendants(settingsRoot).contains { $0 is NSColorWell }, "custom color uses the menu")
+            editorApp.showLayoutWarnings.state == .on && !layoutWarnings.isHidden,
+            "layout warnings are enabled by default")
+        try require(layoutWarnings.frame.height < 40, "one warning uses a compact height")
+        editorApp.showMessages.state = .off
+        editorApp.toggleMessages()
+        try require(!layoutWarnings.isHidden, "layout warnings are independent of status messages")
+        editorApp.showLayoutWarnings.performClick(nil)
+        try require(layoutWarnings.isHidden, "layout warning preference hides the warning area")
+        let warningState =
+            try JSONSerialization.jsonObject(with: Data(contentsOf: editorApp.stateURL))
+            as! [String: Any]
+        try require(
+            warningState["showLayoutWarnings"] as? Bool == false, "warning preference persists")
+        ui.display(warningFixture)
+        try require(layoutWarnings.isHidden, "preview updates respect hidden layout warnings")
+        editorApp.showLayoutWarnings.performClick(nil)
+        warningFixture["warnings"] = (1...12).map { "Layout warning \($0)" }
+        ui.display(warningFixture)
+        ui.view.layoutSubtreeIfNeeded()
+        try require(
+            layoutWarnings.frame.height == 80
+                && layoutWarnings.documentView!.frame.height > layoutWarnings.contentSize.height,
+            "long warning lists scroll within a capped height")
+        warningFixture["warnings"] = [] as [String]
+        ui.display(warningFixture)
+        try require(layoutWarnings.isHidden, "empty warnings leave no warning area")
+        editorApp.showMessages.state = .on
+        editorApp.toggleMessages()
+        ui.display(warningSnapshot)
+        try require(ui.calendarFields.isHidden, "calendars start collapsed")
+        ui.calendarsToggle.performClick(nil)
+        ui.view.layoutSubtreeIfNeeded()
+        try require(!ui.calendarFields.isHidden, "calendar disclosure opens")
+        try require(
+            editorApp.urlField.frame.width > 200 && editorApp.urlField.frame.width < 270,
+            "subscription URL fits the sidebar")
+        let settingsRoot = editorApp.settingsWindow.contentView!
+        try require(
+            !descendants(ui.calendarFields).contains { $0 is NSColorWell },
+            "custom color uses the menu")
+
         let subscriptionMenuItems = editorApp.sourcePicker.itemArray
         try require(
             subscriptionMenuItems.map(\.title) == ["SUBSCRIPTIONS", "Fixture calendar"],
@@ -616,13 +675,78 @@ Task { @MainActor in
                 .appendingPathComponent("native-settings.png"))
         editorApp.addSource()
         try require(
-            editorApp.settingsWindow.firstResponder is NSTextView,
-            "new calendar focuses Settings URL field")
+            editorApp.window.firstResponder is NSTextView,
+            "new calendar focuses sidebar URL field")
         editorApp.sourcePicker.select(
             editorApp.sourcePicker.itemArray.first { $0.representedObject as? String == "legacy" })
         // Restore the fixture selection without changing saved subscriptions.
         editorApp.selectSource()
         try require(editorApp.sourceEnabled.state == .on, "existing calendars default to enabled")
+        try require(
+            editorApp.addSubscriptionButton.isHidden, "existing calendars need no save button")
+        func finishCalendarEdit(_ field: NSTextField, _ value: String) {
+            editorApp.controlTextDidBeginEditing(
+                Notification(name: NSControl.textDidBeginEditingNotification, object: field))
+            field.stringValue = value
+            editorApp.controlTextDidEndEditing(
+                Notification(name: NSControl.textDidEndEditingNotification, object: field))
+        }
+        let originalSources = editorApp.subscriptions
+        editorApp.fetching = true
+        finishCalendarEdit(editorApp.sourceName, "Renamed fixture")
+        editorApp.addSource()
+        try require(
+            !editorApp.addSubscriptionButton.isHidden, "new subscriptions have an Add button")
+        editorApp.fetching = false
+        let renameDeadline = Date().addingTimeInterval(10)
+        while editorApp.subscriptions[0]["name"] as? String != "Renamed fixture"
+            && Date() < renameDeadline
+        {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try require(
+            editorApp.subscriptions[0]["name"] as? String == "Renamed fixture",
+            "name autosave waits for refresh and retains the edited calendar")
+        let renamedState =
+            try JSONSerialization.jsonObject(with: Data(contentsOf: editorApp.stateURL))
+            as! [String: Any]
+        try require(
+            (renamedState["subscriptions"] as? [[String: Any]])?.first?["name"] as? String
+                == "Renamed fixture", "calendar name autosave persists to disk")
+        try require(
+            editorApp.selectedSourceIndex == nil, "autosave preserves the new subscription draft")
+        editorApp.reloadSources(selected: "legacy")
+        finishCalendarEdit(editorApp.urlField, "not a URL")
+        let invalidDeadline = Date().addingTimeInterval(10)
+        while !editorApp.status.stringValue.contains("URL not saved") && Date() < invalidDeadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try require(
+            editorApp.subscriptions[0]["url"] as? String == originalSources[0]["url"] as? String,
+            "invalid URL leaves the saved subscription unchanged")
+        // Disable fetching for this fixture so URL autosave never makes a network request.
+        var disabledSources = editorApp.subscriptions
+        disabledSources[0]["enabled"] = false
+        editorApp.saved["subscriptions"] = disabledSources
+        editorApp.reloadSources(selected: "legacy")
+        finishCalendarEdit(editorApp.urlField, "https://example.invalid/updated.ics")
+        let urlDeadline = Date().addingTimeInterval(10)
+        while (editorApp.subscriptions[0]["url"] as? String != "https://example.invalid/updated.ics"
+            || editorApp.fetching) && Date() < urlDeadline
+        {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try require(
+            editorApp.subscriptions[0]["url"] as? String == "https://example.invalid/updated.ics"
+                && editorApp.subscriptions[0]["ics"] == nil,
+            "URL autosave replaces the URL and clears events from the previous subscription")
+        editorApp.saved["subscriptions"] = originalSources
+        editorApp.saved["nextCheck"] = Date().addingTimeInterval(86400).timeIntervalSince1970
+        _ = try await editorApp.js(
+            "return window.nativeSources(subscriptions,false)", ["subscriptions": originalSources])
+        editorApp.reloadSources(selected: "legacy")
+        editorApp.persist()
+
         for choice in ["Blue", "Custom", "Default"] {
             editorApp.sourceColor.selectItem(withTitle: choice)
             editorApp.customSourceColor = NSColor(
@@ -670,7 +794,6 @@ Task { @MainActor in
         try require(
             editorApp.settingsStatus.stringValue == "Settings status check",
             "operation feedback in both windows")
-        editorApp.settingsTabs.selectTabViewItem(withIdentifier: "general")
         try require(
             editorApp.automatic.window === editorApp.settingsWindow,
             "automatic updates belong to Settings")
@@ -701,6 +824,8 @@ Task { @MainActor in
             editorApp.refreshPicker.indexOfSelectedItem == 1,
             "Settings reopens with retained values")
         editorApp.settingsWindow.performClose(nil)
+        ui.calendarsToggle.performClick(nil)
+        try require(ui.calendarFields.isHidden, "calendar disclosure closes")
         try require(ui.appearanceFields.isHidden, "appearance starts collapsed")
         ui.appearanceToggle.performClick(nil)
         try require(!ui.appearanceFields.isHidden, "appearance disclosure opens")
@@ -715,6 +840,51 @@ Task { @MainActor in
             ui.colorTheme.itemTitles == [
                 "Forest", "Neutral", "Ocean", "Plum", "Rose", "Sand", "Custom",
             ], "color theme choices")
+        #if WAPACAL_CONTROL_EVENTS
+            // Native drags save once, including when released outside the slider.
+            editorApp.show()
+            try await Task.sleep(nanoseconds: 100_000_000)
+            let slider = ui.eventTextSize
+            let originalOnChange = ui.onChange
+            var sliderPatches: [[String: Any]] = []
+            ui.onChange = { sliderPatches.append($0) }
+            for outside in [false, true] {
+                slider.doubleValue = 100
+                ui.changeControl(slider)
+                sliderPatches.removeAll()
+                editorApp.window.makeKeyAndOrderFront(nil)
+                editorApp.window.contentView!.layoutSubtreeIfNeeded()
+                let knob = (slider.cell as! NSSliderCell).knobRect(flipped: slider.isFlipped)
+                @MainActor func mouse(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent {
+                    NSEvent.mouseEvent(
+                        with: type, location: slider.convert(point, to: nil), modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime,
+                        windowNumber: editorApp.window.windowNumber, context: nil,
+                        eventNumber: 0, clickCount: 1, pressure: 1)!
+                }
+                let end = NSPoint(x: slider.bounds.width - 12, y: outside ? -20 : knob.midY)
+                NSApp.postEvent(
+                    mouse(.leftMouseDown, NSPoint(x: knob.midX, y: knob.midY)), atStart: false)
+                NSApp.postEvent(mouse(.leftMouseDragged, end), atStart: false)
+                NSApp.postEvent(mouse(.leftMouseUp, end), atStart: false)
+                try await Task.sleep(nanoseconds: 200_000_000)
+                try require(!slider.isTracking, "native slider finishes tracking")
+                try require(
+                    slider.doubleValue > 100 && sliderPatches.count == 1,
+                    "slider saves once on release: value=\(slider.doubleValue), patches=\(sliderPatches), outside=\(outside)"
+                )
+            }
+            sliderPatches.removeAll()
+            slider.doubleValue = 110
+            _ = slider.sendAction(slider.action, to: slider.target)
+            try require(
+                sliderPatches.count == 1,
+                "non-drag slider actions save immediately")
+            slider.doubleValue = 100
+            ui.changeControl(slider)
+            ui.onChange = originalOnChange
+        #endif
+
         ui.colorTheme.selectItem(withTitle: "Custom")
         ui.changeControl(ui.colorTheme)
         let colorDeadline = Date().addingTimeInterval(15)
@@ -752,6 +922,27 @@ Task { @MainActor in
             }
             try require(ui.editor["eventStyle"] as? String == style, "event style segment action")
         }
+        // Keep a render in flight while newer selections queue behind it.
+        let delayedSnapshot = Task { @MainActor in
+            try await editorApp.js(
+                "await new Promise(resolve => setTimeout(resolve, 200)); return true")
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        for segment in [1, 0, 1, 0, 1] {
+            ui.mode.selectedSegment = segment
+            _ = ui.mode.sendAction(ui.mode.action!, to: ui.mode.target)
+        }
+        _ = try await delayedSnapshot.value
+        let selectionDeadline = Date().addingTimeInterval(15)
+        while editorApp.pendingEdits > 0 && Date() < selectionDeadline {
+            try require(
+                ui.mode.selectedSegment == 1, "older renders must not reset the latest selection")
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try require(editorApp.pendingEdits == 0, "rapid selections completed")
+        try require(ui.editor["mode"] as? String == "month", "latest selection reaches the preview")
+        ui.mode.selectedSegment = 0
+        ui.changeControl(ui.mode)
         ui.theme.selectedSegment = 2
         ui.changeControl(ui.theme)
         let darkDeadline = Date().addingTimeInterval(15)
@@ -874,7 +1065,7 @@ Task { @MainActor in
             ui.tabs.selectTabViewItem(withIdentifier: tab)
             editorApp.window.contentView?.layoutSubtreeIfNeeded()
             try await Task.sleep(nanoseconds: 100_000_000)
-            let root = editorApp.window.contentView!
+            let root = editorApp.window.contentView!.superview!
             let image = root.bitmapImageRepForCachingDisplay(in: root.bounds)!
             root.cacheDisplay(in: root.bounds, to: image)
             try image.representation(using: .png, properties: [:])!.write(
@@ -921,17 +1112,17 @@ Task { @MainActor in
         editorApp.automatic.state = .off
         editorApp.saveTimer?.invalidate()
         editorApp.showSettings()
-        editorApp.settingsTabs.selectTabViewItem(withIdentifier: "calendars")
+        editorApp.showCalendars()
         _ = try await editorApp.js(
             "return window.nativeUpdate(patch)",
             ["patch": ["mode": "month", "month": "2026-09", "course": ""]])
         fake.hasAccess = false
         editorApp.chooseLocalCalendars()
         let recoveryDeadline = Date().addingTimeInterval(10)
-        while editorApp.settingsWindow.attachedSheet == nil && Date() < recoveryDeadline {
+        while editorApp.window.attachedSheet == nil && Date() < recoveryDeadline {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        guard let recovery = editorApp.settingsWindow.attachedSheet,
+        guard let recovery = editorApp.window.attachedSheet,
             let recoveryRoot = recovery.contentView
         else {
             throw WallpaperError.invalid("Calendar access recovery did not open")
@@ -942,7 +1133,7 @@ Task { @MainActor in
             "denied calendar access offers a settings shortcut")
         recoveryButtons.first { $0.title == "Cancel" }!.performClick(nil)
         let recoveryCloseDeadline = Date().addingTimeInterval(10)
-        while (editorApp.settingsWindow.attachedSheet != nil || editorApp.fetching)
+        while (editorApp.window.attachedSheet != nil || editorApp.fetching)
             && Date() < recoveryCloseDeadline
         {
             try await Task.sleep(nanoseconds: 50_000_000)
@@ -955,10 +1146,10 @@ Task { @MainActor in
         editorApp.applicationDidBecomeActive(
             Notification(name: NSApplication.didBecomeActiveNotification))
         let sheetDeadline = Date().addingTimeInterval(10)
-        while editorApp.settingsWindow.attachedSheet == nil && Date() < sheetDeadline {
+        while editorApp.window.attachedSheet == nil && Date() < sheetDeadline {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        guard let sheet = editorApp.settingsWindow.attachedSheet, let sheetRoot = sheet.contentView
+        guard let sheet = editorApp.window.attachedSheet, let sheetRoot = sheet.contentView
         else {
             throw WallpaperError.invalid("Local calendar picker did not open")
         }
@@ -1001,6 +1192,19 @@ Task { @MainActor in
             localMenuItems.map(\.title) == ["CALENDARS ON THIS MAC", "Local Calendar 0"],
             "local calendars have a labeled menu section")
         try require(localMenuItems[1].image != nil, "local calendar has an icon")
+        let requestsBeforeRename = fake.requests.count
+        finishCalendarEdit(editorApp.sourceName, "Renamed local calendar")
+        let localRenameDeadline = Date().addingTimeInterval(10)
+        while editorApp.subscriptions[0]["name"] as? String != "Renamed local calendar"
+            && Date() < localRenameDeadline
+        {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try require(
+            editorApp.subscriptions[0]["name"] as? String == "Renamed local calendar"
+                && fake.requests.count == requestsBeforeRename,
+            "local calendar names autosave without fetching events again")
+
         try require(
             editorApp.selectedSourceIndex == 0, "local menu heading preserves source indexing")
         try require(ui.table.numberOfRows == 1, "local event appears in native checklist")

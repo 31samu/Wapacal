@@ -107,7 +107,7 @@ extension EditorApp {
                 list.frame = NSRect(x: 0, y: 0, width: 400, height: listHeight)
                 list.autoresizingMask = [.width]
                 alert.accessoryView = scroll
-                guard await alert.beginSheetModal(for: settingsWindow) == .alertFirstButtonReturn,
+                guard await alert.beginSheetModal(for: window) == .alertFirstButtonReturn,
                     generation == dataGeneration
                 else { return }
                 var sources = subscriptions
@@ -153,7 +153,7 @@ extension EditorApp {
             "macOS only shows the permission prompt once. Enable Wapacal under Privacy & Security → Calendars, then return here."
         alert.addButton(withTitle: "Open Calendar Settings")
         alert.addButton(withTitle: "Cancel")
-        guard await alert.beginSheetModal(for: settingsWindow) == .alertFirstButtonReturn else {
+        guard await alert.beginSheetModal(for: window) == .alertFirstButtonReturn else {
             waitingForCalendarAccess = false
             return
         }
@@ -180,38 +180,5 @@ extension EditorApp {
         guard localRefreshPending, !fetching else { return }
         localRefreshPending = false
         beginRefresh(force: true, localOnly: true)
-    }
-    func saveLocalSource(at index: Int) {
-        guard ready, !fetching else {
-            status.stringValue = "Wait for the current refresh to finish."
-            return
-        }
-        var sources = subscriptions
-        let name = sourceName.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else {
-            status.stringValue = "Enter a calendar name."
-            return
-        }
-        sources[index]["name"] = name
-        let generation = dataGeneration
-        fetching = true
-        Task { @MainActor in
-            defer {
-                if generation == dataGeneration {
-                    fetching = false
-                    finishLocalRefresh()
-                }
-            }
-            do {
-                _ = try await js(
-                    "return window.nativeSources(subscriptions,clearCourse)",
-                    ["subscriptions": sources, "clearCourse": false])
-                guard generation == dataGeneration else { return }
-                saved["subscriptions"] = sources
-                persist()
-                reloadSources(selected: sources[index]["id"] as? String)
-                localRefreshPending = true
-            } catch { status.stringValue = error.localizedDescription }
-        }
     }
 }

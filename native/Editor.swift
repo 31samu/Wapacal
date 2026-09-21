@@ -39,12 +39,28 @@ final class StatusLabel: NSTextField {
     override var stringValue: String { didSet { mirror?.stringValue = stringValue } }
 }
 
-@MainActor final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate
+@MainActor
+final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSToolbarDelegate,
+    NSTextFieldDelegate
 {
+    private var editorToolbarItems: [NSToolbarItem] = []
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        var identifiers = editorToolbarItems.map(\.itemIdentifier)
+        identifiers.insert(.flexibleSpace, at: 1)
+        return identifiers
+    }
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+    func toolbar(
+        _ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+        willBeInsertedIntoToolbar flag: Bool
+    ) -> NSToolbarItem? {
+        editorToolbarItems.first { $0.itemIdentifier == itemIdentifier }
+    }
     var window: NSWindow!
     var settingsWindow: NSWindow!
     var aboutWindow: NSWindow?
-    let settingsTabs = NSTabView()
     let settingsStatus = NSTextField(wrappingLabelWithString: "")
     let wallpaperSharingWarning = NSStackView()
     var wallpaperWarningHeight: NSLayoutConstraint?
@@ -68,6 +84,7 @@ final class StatusLabel: NSTextField {
     var exporting = false
     var lastEditorError: String?
     var pendingEdits = 0
+    var editorChangeGeneration = 0
     var terminating = false
     var stateReadable = true
     var stateLoadError: String?
@@ -78,6 +95,8 @@ final class StatusLabel: NSTextField {
     private var statusSpacing: NSLayoutConstraint?
     let showMessages = NSButton(
         checkboxWithTitle: "Show messages below the editor", target: nil, action: nil)
+    let showLayoutWarnings = NSButton(
+        checkboxWithTitle: "Show layout warnings", target: nil, action: nil)
     let urlField = NSTextField()
     let sourcePicker = NSPopUpButton()
     var lastSelectedSourceID: String?
@@ -88,7 +107,10 @@ final class StatusLabel: NSTextField {
         "Default", "Green", "Blue", "Purple", "Pink", "Orange", "Red", "Custom",
     ]
     let sourceEnabled = NSButton(checkboxWithTitle: "Enable calendar", target: nil, action: nil)
-    let saveSourceButton = NSButton(title: "Save & refresh", target: nil, action: nil)
+    let addSubscriptionButton = NSButton(title: "Add subscription", target: nil, action: nil)
+    private var editingSourceID: String?
+    private var sourceSaveTask: Task<Void, Never>?
+    private var pendingSourceSaves = 0
     let refreshPicker = NSPopUpButton()
     let screenPicker = NSPopUpButton()
     let automatic = NSButton(
@@ -107,9 +129,6 @@ final class StatusLabel: NSTextField {
     var timer: Timer?
     var saveTimer: Timer?
     var escapeMonitor: Any?
-    var statusMenu: NSMenu?
-    var statusMenuClosedAt: TimeInterval = -.infinity
-    var statusMenuOpen = false
     var session = URLSession(configuration: .ephemeral)
     var stateURL: URL { stateDirectory().appendingPathComponent("app-state.json") }
     var nextCheck: Date { Date(timeIntervalSince1970: saved["nextCheck"] as? Double ?? 0) }
@@ -254,11 +273,7 @@ final class StatusLabel: NSTextField {
             entry.target = title == "Quit" ? NSApp : self
             tray.addItem(entry)
         }
-        tray.delegate = self
-        statusMenu = tray
-        item.button?.target = self
-        item.button?.action = #selector(toggleStatusMenu)
-        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        item.menu = tray
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1200, height: 850),
             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered,
@@ -270,28 +285,60 @@ final class StatusLabel: NSTextField {
         window.delegate = self
         buildSettingsWindow()
         let root = NSView()
-        let displayLabel = NSTextField(labelWithString: "Display")
-        displayLabel.textColor = .secondaryLabelColor
+        _ = editorView.view
         screenPicker.setAccessibilityLabel("Wallpaper display")
         screenPicker.widthAnchor.constraint(lessThanOrEqualToConstant: 260).isActive = true
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         let apply = NSButton(title: "Apply wallpaper", target: self, action: #selector(applyNow))
         apply.bezelStyle = .rounded
-        apply.bezelColor = .controlAccentColor
-        let calendars = NSButton(
-            title: "Calendars…", target: self, action: #selector(showCalendars))
-        calendars.image = NSImage(systemSymbolName: "calendar", accessibilityDescription: nil)
-        calendars.imagePosition = .imageLeading
-        calendars.toolTip = "Add and manage your calendars."
-        let header = EditorViewController.stack(
-            [
-                displayLabel, screenPicker, spacer,
-                NSButton(title: "Refresh", target: self, action: #selector(refreshNow)),
-                calendars,
-                editorView.exportMenu, apply,
-            ], vertical: false, spacing: 10)
-        header.distribution = .fill
+        for (identifier, label, control) in [
+            ("display", "Display", screenPicker),
+            (
+                "refresh", "Refresh",
+                NSButton(title: "Refresh", target: self, action: #selector(refreshNow))
+            ),
+            ("export", "Export", editorView.exportMenu),
+            ("apply", "Apply wallpaper", apply),
+        ] {
+            let toolbarItem = NSToolbarItem(itemIdentifier: NSToolbarItem.Identifier(identifier))
+            toolbarItem.label = label
+            control.controlSize = .small
+            control.font = .systemFont(ofSize: NSFont.systemFontSize)
+            control.bezelStyle = .rounded
+            control.isBordered = false
+            control.contentTintColor = .labelColor
+            let container = NSView()
+            let background = NSBox()
+            background.boxType = .custom
+            background.borderType = .noBorder
+            background.cornerRadius = 5
+            background.fillColor = .quaternaryLabelColor
+            background.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(background)
+            container.addSubview(control)
+            control.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                control.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+                control.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+                control.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+                background.leadingAnchor.constraint(equalTo: control.leadingAnchor, constant: -6),
+                background.trailingAnchor.constraint(equalTo: control.trailingAnchor, constant: 6),
+                background.centerYAnchor.constraint(equalTo: control.centerYAnchor),
+                background.heightAnchor.constraint(equalToConstant: 24),
+                container.heightAnchor.constraint(equalToConstant: 44),
+            ])
+            toolbarItem.view = container
+            // The toolbar's glass backing is separate from the control's border.
+            toolbarItem.isBordered = false
+            editorToolbarItems.append(toolbarItem)
+        }
+        let toolbar = NSToolbar(identifier: "EditorToolbar")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.showsBaselineSeparator = false
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
         wallpaperSharingMessage.font = .systemFont(ofSize: 12)
         wallpaperSharingMessage.textColor = .labelColor
         wallpaperSharingMessage.setContentCompressionResistancePriority(
@@ -312,7 +359,7 @@ final class StatusLabel: NSTextField {
         status.font = .systemFont(ofSize: 11)
         status.textColor = .secondaryLabelColor
         status.maximumNumberOfLines = 2
-        for child in [header, wallpaperSharingWarning, editorView.view, status] {
+        for child in [wallpaperSharingWarning, editorView.view, status] {
             root.addSubview(child)
             child.translatesAutoresizingMaskIntoConstraints = false
         }
@@ -321,13 +368,11 @@ final class StatusLabel: NSTextField {
         statusSpacing = editorView.view.bottomAnchor.constraint(
             equalTo: status.topAnchor, constant: -10)
         NSLayoutConstraint.activate([
-            header.heightAnchor.constraint(equalToConstant: 32),
-            header.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
-            header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
-            header.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
-            wallpaperSharingWarning.topAnchor.constraint(equalTo: header.bottomAnchor),
-            wallpaperSharingWarning.leadingAnchor.constraint(equalTo: header.leadingAnchor),
-            wallpaperSharingWarning.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+            wallpaperSharingWarning.topAnchor.constraint(equalTo: root.topAnchor),
+            wallpaperSharingWarning.leadingAnchor.constraint(
+                equalTo: root.leadingAnchor, constant: 20),
+            wallpaperSharingWarning.trailingAnchor.constraint(
+                equalTo: root.trailingAnchor, constant: -20),
             editorView.view.topAnchor.constraint(
                 equalTo: wallpaperSharingWarning.bottomAnchor, constant: 14),
             editorView.view.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
@@ -415,6 +460,8 @@ final class StatusLabel: NSTextField {
     }
     func queueEditorPatch(_ patch: [String: Any], automaticApply: Bool = true) {
         guard ready else { return }
+        editorChangeGeneration += 1
+        let changeGeneration = editorChangeGeneration
         let selectionGeneration = displaySelectionGeneration
         if let width = patch["width"] as? Int, let height = patch["height"] as? Int,
             (1280...7680).contains(width), (720...4320).contains(height),
@@ -430,7 +477,9 @@ final class StatusLabel: NSTextField {
             defer { self.pendingEdits -= 1 }
             guard generation == self.dataGeneration else { return }
             do {
-                _ = try await self.js("return window.nativeUpdate(patch)", ["patch": patch])
+                _ = try await self.js(
+                    "return window.nativeUpdate(patch)", ["patch": patch],
+                    editorChange: changeGeneration)
                 if patch["mode"] as? String == "module", patch["proposed"] as? Bool == false {
                     self.editorView.closeDetails()
                 }
@@ -462,31 +511,6 @@ final class StatusLabel: NSTextField {
     @objc func openWallpaperSettings() {
         NSWorkspace.shared.open(
             URL(string: "x-apple.systempreferences:com.apple.Wallpaper-Settings.extension")!)
-    }
-    func menuWillOpen(_ menu: NSMenu) { statusMenuOpen = true }
-    func menuDidClose(_ menu: NSMenu) {
-        guard menu === statusMenu else { return }
-        statusMenuOpen = false
-        statusMenuClosedAt = ProcessInfo.processInfo.systemUptime
-        item.menu = nil
-    }
-    @objc func toggleStatusMenu() {
-        guard let menu = statusMenu, let button = item.button else { return }
-        if statusMenuOpen {
-            menu.cancelTracking()
-            return
-        }
-        // Menu tracking may deliver the closing click back to the status button.
-        // Reject that click, including a queued event, before attaching the menu again.
-        if let event = NSApp.currentEvent,
-            event.type == .leftMouseUp || event.type == .rightMouseUp,
-            event.timestamp <= statusMenuClosedAt + 0.3
-        {
-            return
-        }
-        item.menu = menu
-        button.performClick(nil)
-        item.menu = nil
     }
     func getCompanion() -> WallpaperApp {
         if let companion { return companion }
@@ -524,6 +548,7 @@ final class StatusLabel: NSTextField {
     @objc func closeWindow() { NSApp.keyWindow?.performClose(nil) }
     func windowWillClose(_ notification: Notification) {
         let closing = notification.object as? NSWindow
+        closing?.makeFirstResponder(nil)
         if ![window, settingsWindow, aboutWindow, companion?.window].compactMap({ $0 }).contains(
             where: {
                 $0 !== closing && $0.isVisible
@@ -533,8 +558,11 @@ final class StatusLabel: NSTextField {
         }
     }
     @objc func showCalendars() {
-        settingsTabs.selectTabViewItem(withIdentifier: "calendars")
-        showSettings()
+        show()
+        editorView.calendarsToggle.state = .on
+        editorView.toggleCalendars()
+        editorView.view.layoutSubtreeIfNeeded()
+        editorView.calendarsToggle.scrollToVisible(editorView.calendarsToggle.bounds)
     }
     @objc func showAbout() {
         if aboutWindow == nil {
@@ -654,26 +682,6 @@ final class StatusLabel: NSTextField {
             control.widthAnchor.constraint(equalTo: row.widthAnchor).isActive = true
             return row
         }
-        func tab(_ id: String, _ title: String, _ children: [NSView]) {
-            let content = NSView()
-            let stack = EditorViewController.stack(children, spacing: 18)
-            content.addSubview(stack)
-            stack.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 22),
-                stack.bottomAnchor.constraint(
-                    lessThanOrEqualTo: content.bottomAnchor, constant: -22),
-                stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 22),
-                stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -22),
-            ])
-            for child in children {
-                child.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-            }
-            let item = NSTabViewItem(identifier: id)
-            item.label = title
-            item.view = content
-            settingsTabs.addTabViewItem(item)
-        }
         sourcePicker.target = self
         sourcePicker.action = #selector(selectSource)
         sourceEnabled.target = self
@@ -686,34 +694,39 @@ final class StatusLabel: NSTextField {
         sourceColor.setAccessibilityLabel("Event color")
         sourceColor.toolTip =
             "Color for this calendar’s events. Presets adapt to appearance. Choose Custom to open the color picker."
+        sourceName.delegate = self
+        urlField.delegate = self
         sourceName.placeholderString = "e.g. University"
         urlField.placeholderString = "https://…"
         sourceName.setAccessibilityLabel("Calendar name")
         urlField.setAccessibilityLabel("Subscription URL")
         let sourceRow = EditorViewController.stack(
             [
-                sourcePicker,
                 NSButton(title: "New subscription", target: self, action: #selector(addSource)),
-                NSButton(title: "Remove", target: self, action: #selector(removeSource)),
-            ], vertical: false)
+                NSButton(
+                    title: "From this Mac…", target: self,
+                    action: #selector(chooseLocalCalendars)),
+            ], vertical: false, spacing: 6)
         sourcePicker.setContentHuggingPriority(.defaultLow, for: .horizontal)
         sourcePicker.setAccessibilityLabel("Saved calendars")
-        saveSourceButton.target = self
-        saveSourceButton.action = #selector(saveSource)
-        let saveRow = EditorViewController.stack([saveSourceButton, NSView()], vertical: false)
-        tab(
-            "calendars", "Calendars",
-            [
-                note(
-                    "Choose calendars, then use the event checklist in the editor to choose what appears on your wallpaper."
-                ),
-                NSButton(
-                    title: "Calendars on this Mac…", target: self,
-                    action: #selector(chooseLocalCalendars)),
-                sourceRow, field("Calendar name", sourceName), field("Subscription URL", urlField),
-                field("Event color", sourceColor),
-                sourceEnabled, saveRow,
-            ])
+        addSubscriptionButton.target = self
+        addSubscriptionButton.action = #selector(createSubscription)
+        let calendarControls: [NSView] = [
+            sourcePicker, sourceRow, field("Calendar name", sourceName),
+            field("Subscription URL", urlField),
+            field("Event color", sourceColor),
+            EditorViewController.stack(
+                [
+                    sourceEnabled, NSView(),
+                    NSButton(title: "Remove", target: self, action: #selector(removeSource)),
+                ], vertical: false, spacing: 6),
+            addSubscriptionButton,
+        ]
+        for control in calendarControls {
+            editorView.calendarFields.addArrangedSubview(control)
+            control.widthAnchor.constraint(equalTo: editorView.calendarFields.widthAnchor)
+                .isActive = true
+        }
         for (title, seconds) in [
             ("15 minutes", 900.0), ("30 minutes", 1800.0), ("1 hour", 3600.0), ("3 hours", 10800.0),
             ("6 hours", 21600.0), ("12 hours", 43200.0), ("24 hours", 86400.0),
@@ -733,14 +746,15 @@ final class StatusLabel: NSTextField {
         automatic.state = saved["autoApply"] as? Bool == true ? .on : .off
         showMessages.target = self
         showMessages.action = #selector(toggleMessages)
+        showLayoutWarnings.target = self
+        showLayoutWarnings.action = #selector(toggleLayoutWarnings)
         updateMessageVisibility()
         login.target = self
         login.action = #selector(toggleLogin)
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         let separator = NSBox()
         separator.boxType = .separator
-        tab(
-            "general", "General",
+        let settingsContent = EditorViewController.stack(
             [
                 field("Check calendars every", refreshPicker),
                 EditorViewController.stack(
@@ -748,7 +762,7 @@ final class StatusLabel: NSTextField {
                         automatic,
                         note(
                             "Updates the selected display, or all connected displays, when calendars or your edits change. Wapacal must be running."
-                        ), login, showMessages,
+                        ), login, showMessages, showLayoutWarnings,
                     ], spacing: 10),
                 separator,
                 EditorViewController.stack(
@@ -763,7 +777,10 @@ final class StatusLabel: NSTextField {
                             title: "Reset application data…", target: self,
                             action: #selector(resetData)),
                     ], spacing: 12),
-            ])
+            ], spacing: 18)
+        for child in settingsContent.arrangedSubviews {
+            child.widthAnchor.constraint(equalTo: settingsContent.widthAnchor).isActive = true
+        }
         let root = NSView()
         settingsWindow.contentView = root
         settingsStatus.font = .systemFont(ofSize: 12)
@@ -771,15 +788,16 @@ final class StatusLabel: NSTextField {
         settingsStatus.maximumNumberOfLines = 4
         status.mirror = settingsStatus
         settingsStatus.stringValue = status.stringValue
-        for child in [settingsTabs, settingsStatus] {
+        for child in [settingsContent, settingsStatus] {
             root.addSubview(child)
             child.translatesAutoresizingMaskIntoConstraints = false
         }
         NSLayoutConstraint.activate([
-            settingsTabs.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
-            settingsTabs.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
-            settingsTabs.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
-            settingsTabs.bottomAnchor.constraint(equalTo: settingsStatus.topAnchor, constant: -16),
+            settingsContent.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
+            settingsContent.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
+            settingsContent.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+            settingsContent.bottomAnchor.constraint(
+                lessThanOrEqualTo: settingsStatus.topAnchor, constant: -16),
             settingsStatus.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 28),
             settingsStatus.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -28),
             settingsStatus.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
@@ -927,10 +945,14 @@ final class StatusLabel: NSTextField {
         }
         return [try targetScreen()]
     }
-    func js(_ body: String, _ arguments: [String: Any] = [:], updates: Bool = true) async throws
+    func js(
+        _ body: String, _ arguments: [String: Any] = [:], updates: Bool = true,
+        editorChange: Int? = nil
+    ) async throws
         -> Any
     {
         let generation = dataGeneration
+        let changeGeneration = editorChange ?? editorChangeGeneration
         let script =
             updates
             ? """
@@ -954,6 +976,10 @@ final class StatusLabel: NSTextField {
         {
             previewRevision = revision
             saved["editor"] = editor
+            // A render queued before the latest edit must not reset the controls.
+            guard changeGeneration == editorChangeGeneration else {
+                return envelope["value"] ?? NSNull()
+            }
             editorView.display(snapshot)
             updateDisplayResolution()
             if let encoded = snapshot["image"] as? String, let bytes = Data(base64Encoded: encoded),
@@ -1103,6 +1129,7 @@ final class StatusLabel: NSTextField {
         selectSource()
     }
     @objc func selectSource() {
+        window?.makeFirstResponder(nil)
         NSColorPanel.shared.orderOut(nil)
         if selectedSourceIndex == nil {
             let availableIDs = Set(subscriptions.compactMap { $0["id"] as? String })
@@ -1144,16 +1171,17 @@ final class StatusLabel: NSTextField {
         updateSourceColorSwatches()
         sourceEnabled.state = source["enabled"] as? Bool == false ? .off : .on
         sourceEnabled.isEnabled = !source.isEmpty
-        saveSourceButton.title = source.isEmpty ? "Add & refresh" : "Save & refresh"
+        addSubscriptionButton.isHidden = !source.isEmpty
         if ready && !fetching {
             status.stringValue =
                 refreshFailure
                 ?? (source.isEmpty
-                    ? "Enter a name and subscription URL, then choose Add & refresh."
-                    : "Editing \(sourceName.stringValue). Choose Save & refresh to save changes.")
+                    ? "Enter a name and subscription URL, then choose Add subscription."
+                    : "Editing \(sourceName.stringValue). Changes save automatically.")
         }
     }
     @objc func addSource() {
+        window?.makeFirstResponder(nil)
         NSColorPanel.shared.orderOut(nil)
         if let index = selectedSourceIndex {
             let source = subscriptions[index]
@@ -1171,9 +1199,11 @@ final class StatusLabel: NSTextField {
         sourceColor.selectItem(at: 0)
         sourceEnabled.state = .on
         sourceEnabled.isEnabled = false
-        saveSourceButton.title = "Add & refresh"
-        settingsWindow.makeFirstResponder(urlField)
-        status.stringValue = "Enter a name and subscription URL, then choose Add & refresh."
+        addSubscriptionButton.isHidden = false
+        showCalendars()
+        urlField.scrollToVisible(urlField.bounds)
+        window.makeFirstResponder(urlField)
+        status.stringValue = "Enter a name and subscription URL, then choose Add subscription."
     }
     private func updateSourceColorSwatches() {
         // Representative light-appearance colors from src/layout.mjs.
@@ -1336,13 +1366,114 @@ final class StatusLabel: NSTextField {
             }
         }
     }
-    @objc func saveSource() {
-        if let selected = selectedSourceIndex,
-            subscriptions[selected]["provider"] as? String == "eventkit"
-        {
-            saveLocalSource(at: selected)
-            return
+    func controlTextDidBeginEditing(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField,
+            field === sourceName || field === urlField
+        else { return }
+        editingSourceID = sourcePicker.selectedItem?.representedObject as? String
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField,
+            field === sourceName || field === urlField,
+            let id = editingSourceID, ready
+        else { return }
+        editingSourceID = nil
+        let key = field === sourceName ? "name" : "url"
+        let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let generation = dataGeneration
+        let previousSave = sourceSaveTask
+        pendingSourceSaves += 1
+        sourceSaveTask = Task { @MainActor in
+            defer { pendingSourceSaves -= 1 }
+            await previousSave?.value
+            while fetching && generation == dataGeneration {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            guard generation == dataGeneration, ready,
+                let index = subscriptions.firstIndex(where: { $0["id"] as? String == id })
+            else { return }
+            var sources = subscriptions
+            var source = sources[index]
+            let local = source["provider"] as? String == "eventkit"
+            var savedValue = value
+            if key == "url" {
+                guard !local else { return }
+                guard let url = URL(string: value), url.scheme == "https", let host = url.host
+                else {
+                    status.stringValue = "URL not saved. Enter an HTTPS calendar subscription URL."
+                    return
+                }
+                guard
+                    !sources.enumerated().contains(where: {
+                        $0.offset != index && $0.element["url"] as? String == value
+                    })
+                else {
+                    status.stringValue = "URL not saved. That calendar is already subscribed."
+                    return
+                }
+                source["kind"] =
+                    host == "timeedit.net" || host.hasSuffix(".timeedit.net")
+                    ? "timeedit" : "generic"
+            } else if value.isEmpty {
+                guard !local, let url = source["url"] as? String,
+                    let host = URL(string: url)?.host
+                else {
+                    status.stringValue = "Name not saved. Enter a calendar name."
+                    return
+                }
+                savedValue = host
+            }
+            guard source[key] as? String != savedValue else { return }
+            source[key] = savedValue
+            if key == "url" {
+                for key in [
+                    "ics", "fetchedAt", "checkedAt", "etag", "modified", "history", "error",
+                ] {
+                    source.removeValue(forKey: key)
+                }
+            }
+            sources[index] = source
+            fetching = true
+            pendingEdits += 1
+            var succeeded = false
+            do {
+                _ = try await js(
+                    "return window.nativeSources(subscriptions,clearCourse)",
+                    ["subscriptions": sources, "clearCourse": false])
+                saved["subscriptions"] = sources
+                succeeded = true
+                if key == "url" { saved["nextCheck"] = 0.0 }
+                persist()
+                if key == "name",
+                    let item = sourcePicker.itemArray.first(where: {
+                        $0.representedObject as? String == id
+                    })
+                {
+                    item.title = savedValue
+                    item.setAccessibilityLabel(
+                        "\(savedValue), \(local ? "calendar on this Mac" : "subscription")")
+                }
+                status.stringValue = "Calendar changes saved."
+            } catch {
+                status.stringValue =
+                    "Could not save calendar changes. \(error.localizedDescription)"
+            }
+            pendingEdits -= 1
+            guard generation == dataGeneration else { return }
+            fetching = false
+            finishLocalRefresh()
+            guard succeeded else { return }
+            if key == "url" {
+                refreshNow()
+            } else if automatic.state == .on {
+                await makeAndApply(force: false)
+            }
         }
+    }
+
+    @objc func createSubscription() {
+        guard selectedSourceIndex == nil else { return }
         let value = urlField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: value), url.scheme == "https", let host = url.host else {
             status.stringValue = "Enter an HTTPS calendar subscription URL."
@@ -1353,49 +1484,45 @@ final class StatusLabel: NSTextField {
                 "Wait for the current refresh to finish before changing subscriptions."
             return
         }
-        let index = selectedSourceIndex
         var sources = subscriptions
-        guard
-            !sources.enumerated().contains(where: {
-                $0.offset != index && $0.element["url"] as? String == value
-            })
-        else {
+        guard !sources.contains(where: { $0["url"] as? String == value }) else {
             status.stringValue = "That calendar is already subscribed."
             return
         }
-        let adding = index == nil
-        var source: [String: Any] = adding ? ["id": UUID().uuidString] : sources[index!]
-        if source["url"] as? String != value {
-            for key in ["ics", "fetchedAt", "checkedAt", "etag", "modified", "history"] {
-                source.removeValue(forKey: key)
-            }
-        }
+        var source: [String: Any] = ["id": UUID().uuidString]
         let name = sourceName.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         source["url"] = value
         source["name"] = name.isEmpty ? host : name
         source["color"] = selectedSourceColor
         source["kind"] =
             host == "timeedit.net" || host.hasSuffix(".timeedit.net") ? "timeedit" : "generic"
-        if adding { sources.append(source) } else { sources[index!] = source }
+        sources.append(source)
         saved["subscriptions"] = sources
         saved["nextCheck"] = 0.0
-        if adding {
-            var editor = saved["editor"] as? [String: Any] ?? [:]
-            editor["course"] = ""
-            saved["editor"] = editor
-        }
+        var editor = saved["editor"] as? [String: Any] ?? [:]
+        editor["course"] = ""
+        saved["editor"] = editor
         persist()
         reloadSources(selected: source["id"] as? String)
+        let generation = dataGeneration
+        fetching = true
+        pendingEdits += 1
         Task { @MainActor in
+            var succeeded = false
             do {
                 _ = try await js(
                     "return window.nativeSources(subscriptions,clearCourse)",
-                    ["subscriptions": sources, "clearCourse": adding])
+                    ["subscriptions": sources, "clearCourse": true])
                 persist()
-                refreshNow()
+                succeeded = true
             } catch {
                 status.stringValue = "Could not load subscriptions. \(error.localizedDescription)"
             }
+            pendingEdits -= 1
+            guard generation == dataGeneration else { return }
+            fetching = false
+            finishLocalRefresh()
+            if succeeded { refreshNow() }
         }
     }
     func updateMessageVisibility() {
@@ -1404,9 +1531,17 @@ final class StatusLabel: NSTextField {
         status.isHidden = !visible
         statusHeight?.constant = visible ? 30 : 0
         statusSpacing?.constant = visible ? -10 : 0
+        let warningsVisible = saved["showLayoutWarnings"] as? Bool ?? true
+        showLayoutWarnings.state = warningsVisible ? .on : .off
+        editorView.showsLayoutWarnings = warningsVisible
     }
     @objc func toggleMessages() {
         saved["showMessages"] = showMessages.state == .on
+        updateMessageVisibility()
+        persist()
+    }
+    @objc func toggleLayoutWarnings() {
+        saved["showLayoutWarnings"] = showLayoutWarnings.state == .on
         updateMessageVisibility()
         persist()
     }
@@ -1444,8 +1579,20 @@ final class StatusLabel: NSTextField {
         }
         if nextCheck <= Date() { beginRefresh(force: false) }
     }
-    @objc func refreshNow() { beginRefresh(force: true) }
-    @objc func refreshAndApplyNow() { beginRefresh(force: true, applyAfterRefresh: true) }
+    @objc func refreshNow() { refreshAfterSavingSource(apply: false) }
+    @objc func refreshAndApplyNow() { refreshAfterSavingSource(apply: true) }
+    private func refreshAfterSavingSource(apply: Bool) {
+        window?.makeFirstResponder(nil)
+        guard pendingSourceSaves > 0 else {
+            beginRefresh(force: true, applyAfterRefresh: apply)
+            return
+        }
+        let pendingSave = sourceSaveTask
+        Task { @MainActor in
+            await pendingSave?.value
+            beginRefresh(force: true, applyAfterRefresh: apply)
+        }
+    }
     func beginRefresh(force: Bool, applyAfterRefresh: Bool = false, localOnly: Bool = false) {
         guard ready else { return }
         if fetching {
@@ -1641,7 +1788,11 @@ final class StatusLabel: NSTextField {
     }
     @objc func applyNow() {
         window?.makeFirstResponder(nil)
-        Task { @MainActor in await makeAndApply(force: true) }
+        let pendingSave = sourceSaveTask
+        Task { @MainActor in
+            await pendingSave?.value
+            await makeAndApply(force: true)
+        }
     }
     func makeAndApply(force: Bool) async {
         refreshWallpaperSharingWarning()
@@ -1841,14 +1992,16 @@ final class StatusLabel: NSTextField {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         window?.makeFirstResponder(nil)
-        guard pendingEdits > 0 else {
+        guard pendingEdits > 0 || pendingSourceSaves > 0 else {
             persist()
             return .terminateNow
         }
         if !terminating {
             terminating = true
             Task { @MainActor in
-                while pendingEdits > 0 { try? await Task.sleep(nanoseconds: 50_000_000) }
+                while pendingEdits > 0 || pendingSourceSaves > 0 {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
                 persist()
                 sender.reply(toApplicationShouldTerminate: true)
             }

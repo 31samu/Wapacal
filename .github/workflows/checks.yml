@@ -17,11 +17,23 @@ jobs:
   check:
     # Same-repository PR commits already receive push checks. Forks need PR checks.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: macos-26
+    name: macOS ${{ matrix.macos }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - macos: 26
+            runner: macos-26
+            xcode: '26.6'
+          # GitHub's macOS 27 image currently uses the xcode-27 preview label.
+          - macos: 27
+            runner: xcode-27
+            xcode: '27.0'
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     env:
       # Keep Swift tools consistent instead of following the runner's default Xcode.
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_${{ matrix.xcode }}.app/Contents/Developer
     steps:
       - name: Check out source
         uses: actions/checkout@v6
@@ -36,6 +48,8 @@ jobs:
 
       - name: Show Swift tools
         run: |
+          sw_vers
+          xcrun --show-sdk-version
           xcrun swift --version
           xcrun swift-format --version
 

@@ -1,5 +1,71 @@
 import AppKit
 
+final class DayDateField: NSView {
+    let picker: NSDatePicker
+    let previousDay = NSButton()
+    let nextDay = NSButton()
+
+    init(picker: NSDatePicker, title: String) {
+        self.picker = picker
+        super.init(frame: .zero)
+        picker.datePickerStyle = .textField
+        picker.isBezeled = false
+        picker.isBordered = false
+        picker.drawsBackground = false
+        picker.setAccessibilityLabel(title)
+        for (button, symbol, description) in [
+            (previousDay, "chevron.down", "Previous day"),
+            (nextDay, "chevron.up", "Next day"),
+        ] {
+            button.image = NSImage(
+                systemSymbolName: symbol, accessibilityDescription: description
+            )?.withSymbolConfiguration(.init(pointSize: 8, weight: .medium))
+            button.imagePosition = .imageOnly
+            button.isBordered = false
+            button.controlSize = .small
+            button.target = self
+            button.action = #selector(stepDay(_:))
+            button.setAccessibilityLabel("\(description) for \(title.lowercased())")
+        }
+        for control in [picker, previousDay, nextDay] {
+            addSubview(control)
+            control.translatesAutoresizingMaskIntoConstraints = false
+        }
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 24),
+            picker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            picker.centerYAnchor.constraint(equalTo: centerYAnchor),
+            previousDay.leadingAnchor.constraint(equalTo: picker.trailingAnchor, constant: 3),
+            previousDay.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            previousDay.topAnchor.constraint(equalTo: centerYAnchor),
+            previousDay.heightAnchor.constraint(equalToConstant: 11),
+            nextDay.leadingAnchor.constraint(equalTo: previousDay.leadingAnchor),
+            nextDay.trailingAnchor.constraint(equalTo: previousDay.trailingAnchor),
+            nextDay.bottomAnchor.constraint(equalTo: centerYAnchor),
+            nextDay.heightAnchor.constraint(equalToConstant: 11),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.quaternaryLabelColor.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
+    }
+
+    @objc func stepDay(_ sender: NSButton) {
+        guard picker.isEnabled else { return }
+        let days = sender === nextDay ? 1 : -1
+        var calendar = picker.calendar ?? Calendar(identifier: .gregorian)
+        calendar.timeZone = picker.timeZone ?? TimeZone(secondsFromGMT: 0)!
+        guard let date = calendar.date(byAdding: .day, value: days, to: picker.dateValue) else {
+            return
+        }
+        picker.dateValue = date
+        picker.sendAction(picker.action, to: picker.target)
+    }
+}
+
 func colorMenuDot(hex: String?) -> NSImage {
     NSImage(size: NSSize(width: 16, height: 16), flipped: false) { _ in
         let dot = NSBezierPath(ovalIn: NSRect(x: 3, y: 3, width: 10, height: 10))
@@ -39,49 +105,44 @@ final class EditorSlider: NSSlider {
     private(set) var isTracking = false
     var onTrackingEnded: (() -> Void)?
 
-    override func mouseDown(with event: NSEvent) {
-        guard isEnabled, let cell = cell as? NSSliderCell, let window else { return }
-        let originalValue = doubleValue
-        let start = convert(event.locationInWindow, from: nil)
-        let knob = cell.knobRect(flipped: isFlipped)
-        let grabOffset = knob.contains(start) ? start.x - knob.midX : 0
-        doubleValue = minValue
-        let minimumX = cell.knobRect(flipped: isFlipped).midX
-        doubleValue = maxValue
-        let maximumX = cell.knobRect(flipped: isFlipped).midX
-        doubleValue = originalValue
-        guard maximumX > minimumX else { return }
-        isTracking = true
-        defer { isTracking = false }
-
-        func update(_ event: NSEvent) {
-            let point = convert(event.locationInWindow, from: nil)
-            let fraction = min(1, max(0, (point.x - grabOffset - minimumX) / (maximumX - minimumX)))
-            doubleValue = minValue + fraction * (maxValue - minValue)
-            sendAction(action, to: target)
-        }
-        update(event)
-        while let next = window.nextEvent(
-            matching: [.leftMouseDragged, .leftMouseUp, .keyDown],
-            until: .distantFuture, inMode: .eventTracking, dequeue: true)
-        {
-            if next.type == .keyDown {
-                if next.keyCode == 53 {
-                    doubleValue = originalValue
-                    // Refresh the number while tracking, without committing a settings change.
-                    sendAction(action, to: target)
-                    return
-                }
-            } else {
-                update(next)
-                if next.type == .leftMouseUp {
-                    isTracking = false
-                    onTrackingEnded?()
-                    return
-                }
-            }
-        }
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configureTracking()
     }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureTracking()
+    }
+    private func configureTracking() {
+        #if WAPACAL_CONTROL_EVENTS
+            addTarget(self, action: #selector(beginTracking), for: .trackingBegan)
+            addTarget(
+                self, action: #selector(endTracking),
+                for: [.trackingEndedInside, .trackingEndedOutside, .trackingCancelled])
+        #endif
+    }
+    @objc private func beginTracking() {
+        guard !isTracking else { return }
+        isTracking = true
+    }
+    #if !WAPACAL_CONTROL_EVENTS
+        override func mouseDown(with event: NSEvent) {
+            guard isEnabled else { return }
+            beginTracking()
+            super.mouseDown(with: event)
+            endTracking()
+        }
+    #endif
+    override func sendAction(_ action: Selector?, to target: Any?) -> Bool {
+        if !isTracking, NSApp.currentEvent?.type == .leftMouseDown { beginTracking() }
+        return super.sendAction(action, to: target)
+    }
+    @objc private func endTracking() {
+        guard isTracking else { return }
+        isTracking = false
+        onTrackingEnded?()
+    }
+
 }
 
 private final class ThemeColorWell: NSColorWell {
@@ -144,7 +205,7 @@ private final class OverflowScrollView: NSScrollView {
 
 // Every view in this controller is AppKit. Calendar text is always plain text.
 final class EditorViewController: NSViewController, NSMenuItemValidation, NSTableViewDataSource,
-    NSTableViewDelegate,
+    NSTableViewDelegate, NSTabViewDelegate,
     NSTextFieldDelegate
 {
     var onChange: (([String: Any]) -> Void)?
@@ -156,9 +217,14 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     private var suggestions: [[String: Any]] = []
     let preview = NSImageView()
     let tabs = NSTabView()
+    let contentSelector = NSSegmentedControl()
     let summary = NSTextField(labelWithString: "Loading calendar…")
     let warning = NSTextField(wrappingLabelWithString: "")
     private var warningScroll: NSScrollView!
+    private var warningHeight: NSLayoutConstraint?
+    var showsLayoutWarnings = true {
+        didSet { updateLayoutWarnings() }
+    }
     let error = NSTextField(wrappingLabelWithString: "")
     let table = NSTableView()
     let details = NSTextView()
@@ -166,7 +232,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     let theme = NSSegmentedControl()
     let colorTheme = NSPopUpButton()
     let calendarColors = NSButton(
-        checkboxWithTitle: "Use calendar colors", target: nil, action: nil)
+        checkboxWithTitle: "Calendar colors", target: nil, action: nil)
     private var customColorFields: NSStackView!
     private(set) var colorWells: [String: NSColorWell] = [:]
     private var customColors: [String: [String: String]] = [:]
@@ -199,6 +265,8 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     let includeWeekends = NSButton(
         checkboxWithTitle: "Include Saturdays and Sundays", target: nil, action: nil)
     let exportMenu = NSPopUpButton(frame: .zero, pullsDown: true)
+    let calendarsToggle = NSButton(title: "Calendars", target: nil, action: nil)
+    let calendarFields = NSStackView()
     let appearanceToggle = NSButton(checkboxWithTitle: "Appearance", target: nil, action: nil)
     private(set) var appearanceFields: NSStackView!
     private let moreAppearanceToggle = NSButton(title: "More options", target: nil, action: nil)
@@ -237,34 +305,9 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         control.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         return stack
     }
-    private func dateField(_ title: String, _ picker: NSDatePicker) -> NSStackView {
-        // Keep a native text-field bezel while giving the date segments a larger inset.
-        let container = NSView()
-        let bezel = NSTextField()
-        bezel.isEditable = false
-        bezel.isSelectable = false
-        bezel.setAccessibilityElement(false)
-        picker.isBezeled = false
-        picker.isBordered = false
-        picker.drawsBackground = false
-        for view in [bezel, picker] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            container.addSubview(view)
-        }
-        NSLayoutConstraint.activate([
-            bezel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            bezel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -21),
-            bezel.topAnchor.constraint(equalTo: container.topAnchor),
-            bezel.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            picker.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
-            picker.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            picker.topAnchor.constraint(equalTo: container.topAnchor),
-            picker.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-        ])
-        picker.setAccessibilityLabel(title)
-        return field(title, container)
-    }
-    private func scroll(_ content: NSView) -> NSScrollView {
+    private func scroll(
+        _ content: NSView, verticalInset: CGFloat = 12, horizontalInset: CGFloat = 12
+    ) -> NSScrollView {
         let document = FlippedDocumentView()
         document.addSubview(content)
         content.translatesAutoresizingMaskIntoConstraints = false
@@ -278,10 +321,13 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         document.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            content.topAnchor.constraint(equalTo: document.topAnchor, constant: 12),
-            content.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 12),
-            content.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -12),
-            content.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -12),
+            content.topAnchor.constraint(equalTo: document.topAnchor, constant: verticalInset),
+            content.leadingAnchor.constraint(
+                equalTo: document.leadingAnchor, constant: horizontalInset),
+            content.trailingAnchor.constraint(
+                equalTo: document.trailingAnchor, constant: -horizontalInset),
+            content.bottomAnchor.constraint(
+                equalTo: document.bottomAnchor, constant: -verticalInset),
         ])
         return scroll
     }
@@ -289,6 +335,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         view = NSView()
         for (control, labels) in [
             (mode, ["Module", "Month"]),
+            (contentSelector, ["Preview", "Exclude events", "Suggested modules"]),
             (theme, ["System", "Light", "Dark"]), (eventStyle, ["Text", "Boxes"]),
         ] {
             control.segmentCount = labels.count
@@ -346,11 +393,14 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             control.action = #selector(changeControl(_:))
         }
         for picker in [start, end] {
-            picker.controlSize = .small
-            picker.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            picker.controlSize = .regular
+            picker.font = .systemFont(ofSize: NSFont.systemFontSize)
         }
         let dateRange = Self.stack(
-            [dateField("First day", start), dateField("Last day", end)],
+            [
+                field("First day", DayDateField(picker: start, title: "First day")),
+                field("Last day", DayDateField(picker: end, title: "Last day")),
+            ],
             vertical: false, spacing: 8)
         dateRange.distribution = .fillEqually
         moduleFields = Self.stack([field("Module name", name), dateRange])
@@ -505,18 +555,34 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         appearanceToggle.imagePosition = .imageLeft
         appearanceToggle.alignment = .left
         appearanceToggle.title = "Appearance"
-        appearanceToggle.font = .systemFont(ofSize: 13, weight: .semibold)
+        appearanceToggle.font = .systemFont(ofSize: 15, weight: .bold)
+        appearanceToggle.heightAnchor.constraint(equalToConstant: 32).isActive = true
         appearanceToggle.target = self
         appearanceToggle.action = #selector(toggleAppearance)
         appearanceToggle.setAccessibilityLabel("Show appearance options")
+        calendarFields.orientation = .vertical
+        calendarFields.alignment = .leading
+        calendarFields.spacing = 14
+        calendarFields.isHidden = true
+        calendarsToggle.setButtonType(.onOff)
+        calendarsToggle.isBordered = false
+        calendarsToggle.image = NSImage(
+            systemSymbolName: "chevron.right", accessibilityDescription: nil)
+        calendarsToggle.imagePosition = .imageLeft
+        calendarsToggle.alignment = .left
+        calendarsToggle.font = .systemFont(ofSize: 15, weight: .bold)
+        calendarsToggle.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        calendarsToggle.target = self
+        calendarsToggle.action = #selector(toggleCalendars)
+        calendarsToggle.setAccessibilityLabel("Show calendar options")
         let heading = NSTextField(labelWithString: "Schedule")
-        heading.font = .systemFont(ofSize: 13, weight: .semibold)
-        let separator = NSBox()
-        separator.boxType = .separator
+        heading.font = .systemFont(ofSize: 15, weight: .bold)
+        heading.heightAnchor.constraint(equalToConstant: 32).isActive = true
         let settings = Self.stack(
             [
                 heading, field("View", mode), moduleFields, monthField,
-                includeWeekends, separator, appearanceToggle,
+                includeWeekends, calendarsToggle, calendarFields,
+                appearanceToggle,
                 appearanceFields!,
             ], spacing: 18)
         for child in settings.arrangedSubviews {
@@ -531,6 +597,12 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         sidebar.hasVerticalScroller = false
         sidebar.widthAnchor.constraint(equalToConstant: 270).isActive = true
 
+        tabs.tabViewType = .noTabsNoBorder
+        tabs.delegate = self
+        contentSelector.target = self
+        contentSelector.action = #selector(changeContent)
+        contentSelector.setAccessibilityLabel("Content view")
+        contentSelector.selectedSegment = 0
         preview.imageScaling = .scaleProportionallyUpOrDown
         preview.setAccessibilityLabel(
             "Wallpaper preview. Full event information is available in Exclude events.")
@@ -617,10 +689,11 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         error.font = .systemFont(ofSize: 12)
         error.textColor = .systemRed
         error.isHidden = true
-        warningScroll = scroll(warning)
-        warningScroll.heightAnchor.constraint(equalToConstant: 80).isActive = true
+        warningScroll = scroll(warning, verticalInset: 4, horizontalInset: 0)
+        warningHeight = warningScroll.heightAnchor.constraint(equalToConstant: 24)
+        warningHeight?.isActive = true
         warningScroll.isHidden = true
-        let main = Self.stack([error, tabs, summary, warningScroll!])
+        let main = Self.stack([error, contentSelector, tabs, summary, warningScroll!])
         main.distribution = .fill
         tabs.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
         for child in main.arrangedSubviews {
@@ -642,6 +715,25 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         setReady(false)
     }
 
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        updateLayoutWarnings()
+    }
+
+    private func updateLayoutWarnings() {
+        guard let warningScroll else { return }
+        warningScroll.isHidden = !showsLayoutWarnings || warning.stringValue.isEmpty
+        guard !warningScroll.isHidden else { return }
+        let width = warningScroll.contentSize.width
+        guard width > 0, let cell = warning.cell else { return }
+        let textSize = cell.cellSize(
+            forBounds: NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude))
+        let height = min(80, ceil(textSize.height) + 8)
+        if warningHeight?.constant != height {
+            warningHeight?.constant = height
+        }
+    }
+
     func setReady(_ ready: Bool) {
         for control: NSControl in [
             mode, theme, colorTheme, calendarColors, eventStyle, eventTextSize,
@@ -651,6 +743,10 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             showCalendarLegend, showEventTimes, highlightToday,
             includeWeekends, exportMenu,
         ] { control.isEnabled = ready }
+        for picker in [start, end] {
+            (picker.superview as? DayDateField)?.previousDay.isEnabled = ready
+            (picker.superview as? DayDateField)?.nextDay.isEnabled = ready
+        }
         for well in colorWells.values { well.isEnabled = ready }
         for slider in paddingSliders.values { slider.isEnabled = ready }
         updateRevertButtons()
@@ -743,7 +839,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         let size = "\(editor["width"] as? Int ?? 3024) × \(editor["height"] as? Int ?? 1964)"
         summary.toolTip = "Snapshot \(editor["snapshotDate"] as? String ?? "none") · \(size)"
         warning.stringValue = (snapshot["warnings"] as? [String] ?? []).joined(separator: "\n")
-        warningScroll.isHidden = warning.stringValue.isEmpty
+        updateLayoutWarnings()
         table.reloadData()
         if let selected, let index = events.firstIndex(where: { $0["uid"] as? String == selected })
         {
@@ -882,6 +978,15 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         guard notification.object as? NSTextField === name else { return }
         onChange?(["name": name.stringValue])
     }
+    @objc func toggleCalendars() {
+        calendarFields.isHidden = calendarsToggle.state != .on
+        calendarsToggle.image = NSImage(
+            systemSymbolName: calendarsToggle.state == .on ? "chevron.down" : "chevron.right",
+            accessibilityDescription: nil)
+        calendarsToggle.setAccessibilityLabel(
+            calendarsToggle.state == .on ? "Hide calendar options" : "Show calendar options")
+    }
+
     @objc func toggleAppearance() {
         appearanceFields.isHidden = appearanceToggle.state != .on
         appearanceToggle.image = NSImage(
@@ -933,6 +1038,13 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     @objc func exportHEIC() {
         view.window?.makeFirstResponder(nil)
         onExport?(true, nil)
+    }
+    @objc func changeContent() {
+        tabs.selectTabViewItem(at: contentSelector.selectedSegment)
+    }
+    func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        guard let tabViewItem else { return }
+        contentSelector.selectedSegment = tabView.indexOfTabViewItem(tabViewItem)
     }
     @objc func showSuggestions() { tabs.selectTabViewItem(withIdentifier: "suggestions") }
     func closeDetails() { tabs.selectTabViewItem(withIdentifier: "preview") }

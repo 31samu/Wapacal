@@ -11,9 +11,13 @@ const sources = [
 ];
 
 export function compileNative(entryPoint, output, { stdio = 'inherit' } = {}) {
+  // Control events are back-deployed, but their declarations require the macOS 27 SDK.
+  const sdkVersion = execFileSync('xcrun', ['--show-sdk-version'], { encoding: 'utf8' });
+  const controlEvents = Number.parseInt(sdkVersion, 10) >= 27;
   execFileSync(
     'swiftc',
     [
+      ...(controlEvents ? ['-D', 'WAPACAL_CONTROL_EVENTS'] : []),
       '-target',
       `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macosx13.0`,
       '-module-cache-path',

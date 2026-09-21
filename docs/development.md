@@ -41,7 +41,7 @@ After `npm run build:native`, run `npm run test:all`. Native UI and HEIC tests r
 
 To test wallpaper application on connected displays, quit the regular Wapacal app first so automatic updates cannot interfere, then run `WAPACAL_TEST_WALLPAPER=1 npm run test:native-ui`. This opt-in test briefly replaces desktop wallpapers with fictional calendars, verifies each display's image dimensions and single-display isolation, then restores the original wallpaper files. It requires all original files to be accessible before it starts. Normal test runs render per-display images without changing desktop wallpapers. Physical unplug/reconnect and inactive Spaces require separate manual checks.
 
-[GitHub Actions](../.github/workflows/checks.yml) installs dependencies, checks formatting, builds an empty app, and runs all tests. Its workflow file defines the runner and tool versions.
+[GitHub Actions](../.github/workflows/checks.yml) installs dependencies, checks formatting, builds an empty app, and runs all tests. It runs on macOS 26 with Xcode 26.6 and macOS 27 with Xcode 27.0. The macOS 27 job uses GitHub's `xcode-27` public preview runner label. Its workflow file defines the runner and tool versions.
 
 ## Command-line tools
 
