@@ -941,6 +941,7 @@ Task { @MainActor in
                 ui.changeControl(slider)
                 sliderPatches.removeAll()
                 editorApp.window.makeKeyAndOrderFront(nil)
+                slider.scrollToVisible(slider.bounds)
                 editorApp.window.contentView!.layoutSubtreeIfNeeded()
                 let knob = (slider.cell as! NSSliderCell).knobRect(flipped: slider.isFlipped)
                 @MainActor func mouse(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent {
