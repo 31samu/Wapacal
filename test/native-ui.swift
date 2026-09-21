@@ -955,7 +955,12 @@ Task { @MainActor in
                     mouse(.leftMouseDown, NSPoint(x: knob.midX, y: knob.midY)), atStart: false)
                 NSApp.postEvent(mouse(.leftMouseDragged, end), atStart: false)
                 NSApp.postEvent(mouse(.leftMouseUp, end), atStart: false)
-                try await Task.sleep(nanoseconds: 200_000_000)
+                let releaseDeadline = Date().addingTimeInterval(5)
+                while (slider.isTracking || sliderPatches.isEmpty || slider.doubleValue <= 100)
+                    && Date() < releaseDeadline
+                {
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                }
                 try require(!slider.isTracking, "native slider finishes tracking")
                 try require(
                     slider.doubleValue > 100 && sliderPatches.count == 1,
