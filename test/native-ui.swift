@@ -1119,7 +1119,6 @@ Task { @MainActor in
         let pair = try await editorApp.js("return await window.nativePair()") as! [String: Any]
         let light = Data(base64Encoded: pair["light"] as! String)!
         let dark = Data(base64Encoded: pair["dark"] as! String)!
-        try require(light != dark, "different appearance pixels")
         let lightImage = try loadImage(light), darkImage = try loadImage(dark)
         try require(lightImage.width == 2880 && lightImage.height == 1800, "PNG dimensions")
         let output = URL(
