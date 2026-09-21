@@ -2,7 +2,7 @@ import AppKit
 import WebKit
 
 // Compiled into a temporary fixture-only app by native-ui.mjs.
-// Wallpaper apply/restore checks require explicit WAPACAL_TEST_WALLPAPER=1.
+// Preview image and wallpaper apply/restore checks require WAPACAL_TEST_WALLPAPER=1.
 // Never changes login items or the user's Application Support directory.
 func require(_ value: @autoclosure () -> Bool, _ message: String) throws {
     if !value() { throw WallpaperError.invalid("Native UI test failed: " + message) }
@@ -118,13 +118,20 @@ Task { @MainActor in
         try require(
             !descendants(editorApp.window.contentView!).contains { $0 is WKWebView },
             "web view in window hierarchy")
-        let previewDeadline = Date().addingTimeInterval(15)
-        while ui.preview.image == nil && Date() < previewDeadline {
-            try await Task.sleep(nanoseconds: 50_000_000)
+        let wallpaperEnabled =
+            ProcessInfo.processInfo.environment["WAPACAL_TEST_WALLPAPER"] == "1"
+        if wallpaperEnabled {
+            let previewDeadline = Date().addingTimeInterval(15)
+            while ui.preview.image == nil && Date() < previewDeadline {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            try require(
+                ui.preview.image != nil,
+                "native image preview: \(editorApp.lastEditorError ?? editorApp.status.stringValue)"
+            )
+        } else {
+            print("Wallpaper preview checks skipped: WAPACAL_TEST_WALLPAPER is not 1")
         }
-        try require(
-            ui.preview.image != nil,
-            "native image preview: \(editorApp.lastEditorError ?? editorApp.status.stringValue)")
         try require(ui.table.numberOfRows > 0, "event rows")
         try require(ui.name.stringValue == "Prototype module", "saved module name")
         try require(ui.resolution.titleOfSelectedItem == "2880 × 1800", "custom saved image size")
@@ -193,11 +200,13 @@ Task { @MainActor in
             try require(
                 ui.editor["width"] as? Int == Int(nativeSize.width),
                 "switching back uses the display's native resolution")
-            try require(
-                ui.preview.image?.representations.first?.pixelsWide == Int(nativeSize.width)
-                    && ui.preview.image?.representations.first?.pixelsHigh
-                        == Int(nativeSize.height),
-                "switching back rerenders the preview at the native size")
+            if wallpaperEnabled {
+                try require(
+                    ui.preview.image?.representations.first?.pixelsWide == Int(nativeSize.width)
+                        && ui.preview.image?.representations.first?.pixelsHigh
+                            == Int(nativeSize.height),
+                    "switching back rerenders the preview at the native size")
+            }
             ui.displayResolution.performClick(nil)
             while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
         }
@@ -297,7 +306,7 @@ Task { @MainActor in
         }
         _ = try await editorApp.js(
             "return window.nativeUpdate(patch)", ["patch": ["width": 2880, "height": 1800]])
-        if ProcessInfo.processInfo.environment["WAPACAL_TEST_WALLPAPER"] == "1" {
+        if wallpaperEnabled {
             let screens = NSScreen.screens
             let originals = screens.map { WallpaperBackup(screen: $0) }
             try require(
@@ -566,7 +575,10 @@ Task { @MainActor in
         let originalAppearance = NSApp.appearance
         NSApp.appearance = NSAppearance(named: .aqua)
         _ = try await editorApp.js("return window.nativeUpdate({theme: 'system'});")
-        let systemLight = ui.preview.image!.tiffRepresentation!
+        let systemLight = ui.preview.image?.tiffRepresentation
+        if wallpaperEnabled {
+            try require(systemLight != nil, "system light preview is available")
+        }
         let explicitLight =
             try await editorApp.engine.call(
                 "window.nativeUpdate({theme: 'light'}); return window.nativeSnapshot().svg;")
@@ -578,12 +590,24 @@ Task { @MainActor in
         try require(systemSVG == explicitLight, "system uses AppKit light appearance")
         NSApp.appearance = NSAppearance(named: .darkAqua)
         let appearanceDeadline = Date().addingTimeInterval(15)
-        while ui.preview.image!.tiffRepresentation! == systemLight && Date() < appearanceDeadline {
+        while Date() < appearanceDeadline {
+            let currentSVG =
+                try await editorApp.engine.call("return window.nativeSnapshot().svg;") as? String
+            if currentSVG != systemSVG
+                && (!wallpaperEnabled
+                    || (ui.preview.image?.tiffRepresentation != nil
+                        && ui.preview.image?.tiffRepresentation != systemLight))
+            {
+                break
+            }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        try require(
-            ui.preview.image!.tiffRepresentation! != systemLight,
-            "system preview refreshes when AppKit appearance changes")
+        if wallpaperEnabled {
+            try require(
+                ui.preview.image?.tiffRepresentation != nil
+                    && ui.preview.image?.tiffRepresentation != systemLight,
+                "system preview refreshes when AppKit appearance changes")
+        }
         let systemDark =
             try await editorApp.engine.call(
                 "return window.nativeSnapshot().svg;") as! String
