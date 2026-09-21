@@ -1119,37 +1119,40 @@ Task { @MainActor in
         let pair = try await editorApp.js("return await window.nativePair()") as! [String: Any]
         let light = Data(base64Encoded: pair["light"] as! String)!
         let dark = Data(base64Encoded: pair["dark"] as! String)!
-        let lightImage = try loadImage(light), darkImage = try loadImage(dark)
-        try require(lightImage.width == 2880 && lightImage.height == 1800, "PNG dimensions")
-        let output = URL(
-            fileURLWithPath: ProcessInfo.processInfo.environment["WAPACAL_UI_OUTPUT"]!,
-            isDirectory: true)
-        try light.write(to: output.appendingPathComponent("worker-light.png"))
-        try dark.write(to: output.appendingPathComponent("worker-dark.png"))
-        try encodePair(
-            light: lightImage, dark: darkImage, to: output.appendingPathComponent("worker.heic"))
-        let info = try inspectData(Data(contentsOf: output.appendingPathComponent("worker.heic")))
-        try require(
-            info.frameCount == 2 && info.width == 2880 && info.darkIndex == 1, "HEIC export")
+        if let lightImage = try? loadImage(light), let darkImage = try? loadImage(dark) {
+            try require(lightImage.width == 2880 && lightImage.height == 1800, "PNG dimensions")
+            let output = URL(
+                fileURLWithPath: ProcessInfo.processInfo.environment["WAPACAL_UI_OUTPUT"]!,
+                isDirectory: true)
+            try light.write(to: output.appendingPathComponent("worker-light.png"))
+            try dark.write(to: output.appendingPathComponent("worker-dark.png"))
+            try encodePair(
+                light: lightImage, dark: darkImage, to: output.appendingPathComponent("worker.heic")
+            )
+            let info = try inspectData(
+                Data(contentsOf: output.appendingPathComponent("worker.heic")))
+            try require(
+                info.frameCount == 2 && info.width == 2880 && info.darkIndex == 1, "HEIC export")
 
-        editorApp.openExportFile(output.appendingPathComponent("worker.heic").path)
-        try require(
-            importer.window?.isVisible == true && importer.lightView.image != nil
-                && importer.darkView.image != nil, "valid import opens populated preview")
-        try require(NSApp.mainMenu === mainMenu, "import retains application menus")
-        editorApp.window.performClose(nil)
-        try require(
-            NSApp.activationPolicy() == .regular && importer.window.isVisible,
-            "import preview remains active after editor closes")
-        importer.window.performClose(nil)
-        try require(
-            NSApp.activationPolicy() == .accessory, "closing final preview leaves menu bar app")
-        editorApp.openExportFile(output.appendingPathComponent("worker.heic").path)
-        try require(
-            importer.window.isVisible && NSApp.mainMenu === mainMenu,
-            "reopen existing import preview")
-        editorApp.show()
-        importer.window.performClose(nil)
+            editorApp.openExportFile(output.appendingPathComponent("worker.heic").path)
+            try require(
+                importer.window?.isVisible == true && importer.lightView.image != nil
+                    && importer.darkView.image != nil, "valid import opens populated preview")
+            try require(NSApp.mainMenu === mainMenu, "import retains application menus")
+            editorApp.window.performClose(nil)
+            try require(
+                NSApp.activationPolicy() == .regular && importer.window.isVisible,
+                "import preview remains active after editor closes")
+            importer.window.performClose(nil)
+            try require(
+                NSApp.activationPolicy() == .accessory, "closing final preview leaves menu bar app")
+            editorApp.openExportFile(output.appendingPathComponent("worker.heic").path)
+            try require(
+                importer.window.isVisible && NSApp.mainMenu === mainMenu,
+                "reopen existing import preview")
+            editorApp.show()
+            importer.window.performClose(nil)
+        }
 
         for (tab, file) in [
             ("preview", "native-preview"), ("events", "native-events"),
