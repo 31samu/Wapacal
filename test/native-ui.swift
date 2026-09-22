@@ -1119,11 +1119,11 @@ Task { @MainActor in
         let pair = try await editorApp.js("return await window.nativePair()") as! [String: Any]
         let light = Data(base64Encoded: pair["light"] as! String)!
         let dark = Data(base64Encoded: pair["dark"] as! String)!
+        let output = URL(
+            fileURLWithPath: ProcessInfo.processInfo.environment["WAPACAL_UI_OUTPUT"]!,
+            isDirectory: true)
         if let lightImage = try? loadImage(light), let darkImage = try? loadImage(dark) {
             try require(lightImage.width == 2880 && lightImage.height == 1800, "PNG dimensions")
-            let output = URL(
-                fileURLWithPath: ProcessInfo.processInfo.environment["WAPACAL_UI_OUTPUT"]!,
-                isDirectory: true)
             try light.write(to: output.appendingPathComponent("worker-light.png"))
             try dark.write(to: output.appendingPathComponent("worker-dark.png"))
             try encodePair(
