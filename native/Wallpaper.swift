@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -217,6 +218,17 @@ func appliedDirectory() -> URL {
     wallpapersDirectory().appendingPathComponent("applied", isDirectory: true)
 }
 
+func storeAppliedWallpaper(_ data: Data) throws -> URL {
+    let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    let file = appliedDirectory().appendingPathComponent("wapacal-\(digest).heic")
+    // A URL must always identify the same image, even when it is no longer selected.
+    // macOS can retain cached renders of previously selected wallpaper URLs.
+    if !FileManager.default.fileExists(atPath: file.path) {
+        try data.write(to: file, options: .atomic)
+    }
+    return file
+}
+
 func ensureWorkspaceDirectories() throws {
     for directory in [
         stateDirectory(), recoveryDirectory(), wallpapersDirectory(), appliedDirectory(),
@@ -356,10 +368,20 @@ private func trimFiles(
 
 func cleanupRuntimeFiles() throws {
     try ensureWorkspaceDirectories()
-    let active = Set(
+    var active = Set(
         NSScreen.screens.compactMap {
             NSWorkspace.shared.desktopImageURL(for: $0)?.standardizedFileURL.path
         })
+    for file in try FileManager.default.contentsOfDirectory(
+        at: recoveryDirectory(), includingPropertiesForKeys: nil)
+    where file.lastPathComponent.hasPrefix("restore-") {
+        if let data = try? Data(contentsOf: file),
+            let backup = try? JSONDecoder().decode(WallpaperBackup.self, from: data),
+            let url = backup.url
+        {
+            active.insert(url.standardizedFileURL.path)
+        }
+    }
     try trimFiles(
         in: appliedDirectory(),
         matching: { $0.hasSuffix(".heic") && !$0.hasPrefix("display-") },
@@ -419,15 +441,7 @@ func applyWallpaper(_ url: URL, screen: NSScreen) throws -> Bool {
         try encoder.encode(WallpaperBackup(screen: screen)).write(to: backup, options: .atomic)
     }
     let previous = WallpaperBackup(screen: screen)
-    // Alternate two URLs per display. Reapplying the current URL can keep a stale
-    // render on macOS, while a fresh UUID on every update fills up Your Photos.
-    let first = appliedDirectory().appendingPathComponent("display-\(screenID(screen))-a.heic")
-    let second = appliedDirectory().appendingPathComponent("display-\(screenID(screen))-b.heic")
-    let copy = previous.url?.standardizedFileURL == first.standardizedFileURL ? second : first
-    let previousData =
-        FileManager.default.fileExists(atPath: copy.path)
-        ? try readBounded(copy) : nil
-    try data.write(to: copy, options: .atomic)
+    let copy = try storeAppliedWallpaper(data)
     do {
         try NSWorkspace.shared.setDesktopImageURL(
             copy, for: screen,
@@ -451,8 +465,7 @@ func applyWallpaper(_ url: URL, screen: NSScreen) throws -> Bool {
                 "macOS did not confirm the wallpaper for \(screen.localizedName).")
         }
     } catch {
-        // Restore the reused file and previous selection if macOS rejects the update.
-        if let previousData { try? previousData.write(to: copy, options: .atomic) }
+        // Restore the previous selection if macOS rejects the update.
         if let original = previous.url, previous.canRestore {
             try? NSWorkspace.shared.setDesktopImageURL(
                 original, for: screen, options: previous.options)

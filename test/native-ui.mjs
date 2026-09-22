@@ -93,6 +93,7 @@ test(
     const output = await readFile(stdout, 'utf8'),
       errors = await readFile(stderr, 'utf8');
     assert.match(output, /integration checks passed/, errors || 'Native UI test did not finish.');
+    console.log(output.trim());
     console.log(`Native UI screenshots and exports: ${temp}`);
   },
 );

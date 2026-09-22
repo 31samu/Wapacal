@@ -5,6 +5,14 @@ const nativeDefaults = (() => {
   return {
     mode: 'module',
     theme: 'system',
+    colorTheme: 'forest',
+    calendarColors: true,
+    eventStyle: 'text',
+    eventTextScale: 1,
+    paddingLeft: 76,
+    paddingRight: 76,
+    paddingTop: 24,
+    paddingBottom: 22,
     month: today.slice(0, 7),
     ...config.module,
     course: config.allCalendars ? '' : config.course,
@@ -13,7 +21,12 @@ const nativeDefaults = (() => {
     height: config.height,
     showTitle: false,
     rooms: true,
-    iconSpace: true,
+    showTimeZone: true,
+    showSnapshotDate: true,
+    showCalendarLegend: true,
+    showEventTimes: true,
+    showWeekNumbers: true,
+    highlightToday: true,
     includeWeekends: config.includeWeekends === true,
     today,
     snapshotDate: 'none',
@@ -91,6 +104,15 @@ window.nativeUpdate = function (patch) {
   const editable = [
     'mode',
     'theme',
+    'colorTheme',
+    'customColors',
+    'calendarColors',
+    'eventStyle',
+    'eventTextScale',
+    'paddingLeft',
+    'paddingRight',
+    'paddingTop',
+    'paddingBottom',
     'month',
     'name',
     'start',
@@ -101,7 +123,12 @@ window.nativeUpdate = function (patch) {
     'height',
     'showTitle',
     'rooms',
-    'iconSpace',
+    'showTimeZone',
+    'showSnapshotDate',
+    'showCalendarLegend',
+    'showEventTimes',
+    'showWeekNumbers',
+    'highlightToday',
     'includeWeekends',
   ];
   if (Object.keys(patch).some((key) => !editable.includes(key)))
@@ -109,6 +136,17 @@ window.nativeUpdate = function (patch) {
   const next = { ...state, ...patch };
   if (!['module', 'month'].includes(next.mode) || !['system', 'light', 'dark'].includes(next.theme))
     throw new Error('Choose a valid view and appearance.');
+  if (!['text', 'boxes'].includes(next.eventStyle)) throw new Error('Choose a valid event style.');
+  for (const key of [
+    'showTimeZone',
+    'showWeekNumbers',
+    'highlightToday',
+    'showSnapshotDate',
+    'showCalendarLegend',
+    'showEventTimes',
+  ]) {
+    if (typeof next[key] !== 'boolean') throw new Error('Choose a valid visibility setting.');
+  }
   if (typeof next.includeWeekends !== 'boolean')
     throw new Error('Choose whether to include weekends.');
   if (typeof next.name !== 'string' || !next.name.trim()) throw new Error('Enter a module name.');
@@ -192,6 +230,12 @@ window.nativeSnapshot = function () {
   return {
     revision,
     editor: { ...state, excludedEventIds: [...state.excludedEventIds] },
+    colorThemes: Object.entries(colorThemes).map(([id, theme]) => ({
+      id,
+      name: theme.name,
+      accent: theme.light.accent,
+    })),
+    customColors: customThemeColors(state),
     courseCode,
     events: candidates.map((event) => ({
       ...event,
@@ -212,6 +256,11 @@ async function pngBase64(svg) {
       image.onerror = () => reject(new Error('Could not render the wallpaper image.'));
       image.src = url;
     });
+    if (typeof image.decode === 'function') {
+      try {
+        await image.decode();
+      } catch {}
+    }
     const canvas = document.createElement('canvas');
     canvas.width = image.naturalWidth;
     canvas.height = image.naturalHeight;

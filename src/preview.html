@@ -270,6 +270,21 @@
             <option value="dark">Dark</option>
           </select>
         </div>
+        <div class="field">
+          <label for="color-theme">Color theme</label
+          ><select id="color-theme"></select>
+        </div>
+        <div id="custom-colors" hidden></div>
+        <label id="calendar-colors-field" class="check"
+          ><input id="calendar-colors" type="checkbox" checked />Calendar colors</label
+        >
+        <div class="field">
+          <label for="event-style">Event style</label>
+          <select id="event-style">
+            <option value="text">Text</option>
+            <option value="boxes">Boxes</option>
+          </select>
+        </div>
         <div id="module-fields">
           <div class="field">
             <label for="module-name">Module name</label><input id="module-name" maxlength="120" />
@@ -288,21 +303,12 @@
           <label for="resolution">Image size</label
           ><select id="resolution"></select>
         </div>
-        <div class="field">
-          <label for="course">Events</label
-          ><select id="course">
-            <option value="course">Course only</option>
-            <option value="all">All calendar events</option>
-          </select>
-        </div>
         <fieldset>
           <legend>Layout</legend>
           <label class="check"><input type="checkbox" id="show-title" checked /> Show title</label
-          ><label class="check"><input type="checkbox" id="rooms" checked /> Show rooms</label
+          ><label class="check"><input type="checkbox" id="rooms" checked /> Show locations</label
           ><label class="check"
             ><input type="checkbox" id="weekends" /> Include Saturdays and Sundays</label
-          ><label class="check"
-            ><input type="checkbox" id="icon-space" checked /> Leave room for desktop icons</label
           >
         </fieldset>
         <div class="actions export-actions">
@@ -352,22 +358,58 @@
       const state = {
         mode: 'module',
         theme: 'system',
+        colorTheme: 'forest',
+        calendarColors: true,
+        eventStyle: 'text',
         month: data.today.slice(0, 7),
         name: config.module.name,
         start: config.module.start,
         end: config.module.end,
         proposed: config.module.proposed,
-        course: config.allCalendars ? '' : config.course,
+        course: '',
         timeZone: config.timeZone,
         width: config.width,
         height: config.height,
         showTitle: config.showTitle !== false,
         rooms: true,
         includeWeekends: config.includeWeekends === true,
-        iconSpace: true,
         today: data.today,
         snapshotDate: data.snapshotDate,
       };
+      for (const [id, preset] of Object.entries(colorThemes)) {
+        $('color-theme').add(new Option(preset.name, id));
+      }
+      $('color-theme').add(new Option('Custom', 'custom'));
+      for (const appearance of ['light', 'dark']) {
+        const group = document.createElement('fieldset');
+        const legend = document.createElement('legend');
+        legend.textContent = `${appearance === 'light' ? 'Light' : 'Dark'} colors`;
+        group.append(legend);
+        for (const [key, title] of [
+          ['bg', 'Background'],
+          ['text', 'Text'],
+          ['accent', 'Accent'],
+        ]) {
+          const label = document.createElement('label');
+          label.textContent = title;
+          const input = document.createElement('input');
+          input.type = 'color';
+          input.id = `color-${appearance}-${key}`;
+          input.setAttribute('aria-label', `${appearance} ${title.toLowerCase()} color`);
+          input.addEventListener('input', () => {
+            state.customColors[appearance][key] = input.value;
+            render();
+          });
+          label.append(input);
+          group.append(label);
+        }
+        $('custom-colors').append(group);
+      }
+      $('color-theme').addEventListener('input', () => {
+        if ($('color-theme').value === 'custom') state.customColors = customThemeColors(state);
+        state.colorTheme = $('color-theme').value;
+        render();
+      });
       let result;
       let exportingPair = false;
       const selectionKey = 'wapacal-excluded-events:' + data.name;
@@ -389,7 +431,6 @@
       } catch {
         $('selection-note').textContent = 'Event choices last for this preview session.';
       }
-      $('course').value = state.course ? 'course' : 'all';
       $('module-name').value = state.name;
       $('start').value = state.start;
       $('end').value = state.end;
@@ -489,6 +530,13 @@
         panel.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
       });
       function render() {
+        $('custom-colors').hidden = state.colorTheme !== 'custom';
+        const colors = customThemeColors(state);
+        for (const appearance of ['light', 'dark']) {
+          for (const key of ['bg', 'text', 'accent']) {
+            $(`color-${appearance}-${key}`).value = colors[appearance][key];
+          }
+        }
         $('module-fields').hidden = state.mode !== 'module';
         $('month-field').hidden = state.mode !== 'month';
         try {
@@ -590,6 +638,7 @@
       const binds = [
         ['mode', 'mode'],
         ['theme', 'theme'],
+        ['event-style', 'eventStyle'],
         ['month', 'month'],
         ['module-name', 'name'],
         ['start', 'start'],
@@ -603,20 +652,16 @@
         }),
       );
       [
+        ['calendar-colors', 'calendarColors'],
         ['show-title', 'showTitle'],
         ['rooms', 'rooms'],
         ['weekends', 'includeWeekends'],
-        ['icon-space', 'iconSpace'],
       ].forEach(([id, key]) =>
         $(id).addEventListener('change', () => {
           state[key] = $(id).checked;
           render();
         }),
       );
-      $('course').addEventListener('change', () => {
-        state.course = $('course').value === 'all' ? '' : config.course;
-        render();
-      });
       $('resolution').addEventListener('change', () => {
         [state.width, state.height] = $('resolution').value.split('x').map(Number);
         render();
@@ -638,6 +683,11 @@
             image.onerror = () => reject(new Error('Image export failed. Try SVG instead.'));
             image.src = url;
           });
+          if (typeof image.decode === 'function') {
+            try {
+              await image.decode();
+            } catch {}
+          }
           const canvas = document.createElement('canvas');
           canvas.width = image.naturalWidth;
           canvas.height = image.naturalHeight;

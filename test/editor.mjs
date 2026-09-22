@@ -417,3 +417,203 @@ test('local calendar selection and individual exclusions survive refresh, moves 
   assert.equal(snapshot().events.length, 0);
   dom.window.close();
 });
+
+test('event style defaults to text, switches rendering and survives reload', async () => {
+  const { dom, w, seed, snapshot } = await setup();
+  const original = snapshot();
+  assert.equal(original.editor.eventStyle, 'text');
+  w.nativeUpdate({ eventStyle: 'boxes' });
+  const boxed = snapshot();
+  assert.equal(boxed.editor.eventStyle, 'boxes');
+  assert.notEqual(boxed.svg, original.svg);
+  w.nativeLoad({ ...seed, editor: boxed.editor });
+  assert.equal(snapshot().svg, boxed.svg);
+  assert.throws(() => w.nativeUpdate({ eventStyle: 'invalid' }));
+  assert.equal(snapshot().editor.eventStyle, 'boxes');
+  w.nativeUpdate({ eventStyle: 'text' });
+  assert.equal(snapshot().svg, original.svg);
+  dom.window.close();
+});
+
+test('color themes render in both appearances and custom colors survive reload', async () => {
+  const { dom, w, seed, snapshot } = await setup();
+  w.nativeUpdate({ mode: 'month', month: '2026-10', course: '' });
+  w.nativeSources(
+    [
+      {
+        id: 'colored',
+        name: 'Colored calendar',
+        color: '#ff0000',
+        ics: calendar(session('colored', 'Colored event', '20261005')),
+      },
+    ],
+    false,
+  );
+  for (const colorTheme of ['forest', 'neutral', 'ocean', 'plum', 'rose', 'sand']) {
+    for (const theme of ['light', 'dark']) {
+      w.nativeUpdate({ colorTheme, theme, eventStyle: 'boxes', calendarColors: false });
+      const current = snapshot();
+      assert.ok(current.svg.includes('<svg'));
+      if (colorTheme === 'neutral') {
+        for (const [, hex] of current.svg.matchAll(/(?:fill|stroke)="(#[0-9a-f]{6})"/gi)) {
+          assert.equal(hex.slice(1, 3), hex.slice(3, 5));
+          assert.equal(hex.slice(3, 5), hex.slice(5, 7));
+        }
+      }
+      for (const eventStyle of ['text', 'boxes']) {
+        w.nativeUpdate({ calendarColors: true, eventStyle });
+        assert.match(snapshot().svg, /fill="#ff0000"[^>]*>Colored calendar<\/text>/);
+        if (eventStyle === 'text') {
+          assert.match(snapshot().svg, /fill="#ff0000"[^>]*>Colored event<\/text>/);
+        } else {
+          assert.ok(snapshot().svg.includes(theme === 'light' ? '#ff4d4d' : '#b30000'));
+        }
+      }
+    }
+  }
+  const customColors = {
+    light: { bg: '#fafafa', text: '#222222', accent: '#995511' },
+    dark: { bg: '#111111', text: '#eeeeee', accent: '#eeaa55' },
+  };
+  w.nativeUpdate({ colorTheme: 'custom', customColors, calendarColors: false });
+  const saved = snapshot().editor;
+  w.nativeLoad({ ...seed, editor: saved });
+  assert.deepEqual(snapshot().editor.customColors, customColors);
+  for (const theme of ['light', 'dark']) {
+    w.nativeUpdate({ theme });
+    assert.ok(snapshot().svg.includes(`fill="${customColors[theme].bg}"`));
+  }
+  w.nativeUpdate({ colorTheme: 'ocean' });
+  w.nativeUpdate({ colorTheme: 'custom' });
+  assert.deepEqual(snapshot().editor.customColors, customColors);
+  const before = snapshot();
+  for (const patch of [
+    { colorTheme: 'unknown' },
+    { calendarColors: 'yes' },
+    { customColors: null },
+    { customColors: { light: { bg: 'red' } } },
+    { customColors: { ...customColors, dark: { ...customColors.dark, accent: '#fff\"/>' } } },
+  ]) {
+    assert.throws(() => w.nativeUpdate(patch));
+    assert.deepEqual(snapshot(), before);
+  }
+  dom.window.close();
+});
+
+test('unconfigured custom colors default to neutral and light boxes respect custom text', async () => {
+  const { dom, w, snapshot } = await setup();
+  for (const colorTheme of ['forest', 'ocean', 'custom']) {
+    w.nativeUpdate({ colorTheme });
+    assert.deepEqual(snapshot().customColors, {
+      light: { bg: '#f2f2f2', text: '#292929', accent: '#555555' },
+      dark: { bg: '#202020', text: '#eeeeee', accent: '#bbbbbb' },
+    });
+  }
+  const customColors = snapshot().customColors;
+  customColors.light.text = '#123456';
+  w.nativeUpdate({ colorTheme: 'custom', theme: 'light', eventStyle: 'boxes', customColors });
+  const current = snapshot();
+  const doc = new JSDOM(current.svg, { contentType: 'image/svg+xml' }).window.document;
+  const boxes = [...doc.querySelectorAll('rect')].filter((rect) => rect.getAttribute('rx') === '5');
+  assert.ok(boxes.length > 0);
+  for (const box of boxes) {
+    let next = box.nextElementSibling;
+    if (next.tagName !== 'text') next = next.nextElementSibling;
+    assert.equal(next.getAttribute('fill'), '#123456');
+  }
+  dom.window.close();
+});
+
+test('event text size changes rendering, survives reload, and rejects invalid values', async () => {
+  const { dom, w, seed, snapshot } = await setup();
+  assert.equal(snapshot().editor.eventTextScale, 1);
+  for (const eventStyle of ['text', 'boxes']) {
+    for (const eventTextScale of [0.75, 1.5]) {
+      w.nativeUpdate({ eventStyle, eventTextScale });
+      assert.match(snapshot().svg, new RegExp(`font-size="${14 * eventTextScale}"`));
+      const editor = snapshot().editor;
+      w.nativeLoad({ ...seed, editor });
+      assert.equal(snapshot().editor.eventTextScale, eventTextScale);
+    }
+  }
+  const before = snapshot();
+  for (const eventTextScale of [0.5, 2, '1', NaN, Infinity]) {
+    assert.throws(() => w.nativeUpdate({ eventTextScale }), /event text size/);
+    assert.deepEqual(snapshot(), before);
+  }
+  dom.window.close();
+});
+
+test('edge padding changes layout, survives reload, and rejects invalid values', async () => {
+  const { dom, w, seed, snapshot } = await setup();
+  const position = (label) => {
+    const doc = new JSDOM(snapshot().svg, { contentType: 'image/svg+xml' }).window.document;
+    const node = [...doc.querySelectorAll('text')].find((node) => node.textContent === label);
+    return ['x', 'y'].map((axis) => Number(node.getAttribute(axis)));
+  };
+  const footerLabel = 'Snapshot ' + snapshot().editor.snapshotDate;
+  const footer = position(footerLabel);
+  const week = position('WK');
+  const zone = position(snapshot().editor.timeZone);
+  const patch = { paddingLeft: 96, paddingRight: 96, paddingTop: 44, paddingBottom: 42 };
+  w.nativeUpdate(patch);
+  assert.deepEqual(position('WK'), [week[0] + 20, week[1] + 20]);
+  assert.deepEqual(position(footerLabel), [footer[0] + 20, footer[1] - 20]);
+  assert.deepEqual(position(snapshot().editor.timeZone), [zone[0] - 20, zone[1] + 20]);
+  const editor = snapshot().editor;
+  const svg = snapshot().svg;
+  w.nativeLoad({ ...seed, editor });
+  assert.equal(snapshot().svg, svg);
+  for (const [key, value] of Object.entries(patch)) assert.equal(snapshot().editor[key], value);
+  const before = snapshot();
+  for (const key of Object.keys(patch)) {
+    for (const value of [-1, 201, '20', NaN, Infinity]) {
+      assert.throws(() => w.nativeUpdate({ [key]: value }), /padding/);
+      assert.deepEqual(snapshot(), before);
+    }
+  }
+  dom.window.close();
+});
+
+test('visibility options change rendering and survive reload', async () => {
+  const { dom, w, seed, snapshot } = await setup();
+  const original = snapshot().svg;
+  for (const key of [
+    'showTimeZone',
+    'showWeekNumbers',
+    'highlightToday',
+    'showSnapshotDate',
+    'showCalendarLegend',
+    'showEventTimes',
+  ]) {
+    assert.equal(snapshot().editor[key], true);
+    w.nativeUpdate({ [key]: false });
+    const editor = snapshot().editor;
+    w.nativeLoad({ ...seed, editor });
+    assert.equal(snapshot().editor[key], false);
+    const before = snapshot();
+    assert.throws(() => w.nativeUpdate({ [key]: 'false' }), /visibility/);
+    assert.deepEqual(snapshot(), before);
+    w.nativeUpdate({ [key]: true });
+    assert.equal(snapshot().svg, original);
+  }
+  const editor = snapshot().editor;
+  const render = (patch) =>
+    renderWallpaper([], { ...editor, mode: 'month', month: '2026-09', ...patch });
+  const normal = render({});
+  const noZone = render({ showTimeZone: false });
+  assert.ok(normal.bounds.some((item) => item.text === editor.timeZone));
+  assert.ok(!noZone.bounds.some((item) => item.text === editor.timeZone));
+  const noWeeks = render({ showWeekNumbers: false });
+  assert.ok(!noWeeks.bounds.some((item) => item.text === 'WK'));
+  const mondayX = (result) => result.bounds.find((item) => item.text === 'MONDAY').x;
+  assert.equal(mondayX(noWeeks), mondayX(normal) - 44);
+  for (const today of ['2026-09-08', '2026-09-12']) {
+    const highlighted = render({ today });
+    assert.ok(highlighted.bounds.some((item) => item.text.startsWith('TODAY')));
+    const hidden = render({ today, highlightToday: false });
+    assert.ok(!hidden.bounds.some((item) => item.text.startsWith('TODAY')));
+    assert.equal(hidden.svg, render({ today: undefined }).svg);
+  }
+  dom.window.close();
+});

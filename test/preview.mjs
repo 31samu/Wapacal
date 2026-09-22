@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM, VirtualConsole } from 'jsdom';
 import sharp from 'sharp';
-import { renderWallpaper, selectEvents } from '../src/layout.mjs';
+import { renderWallpaper, selectEvents, palettes, colorThemes } from '../src/layout.mjs';
 import { loadFixtureApp } from './helpers/fixture-app.mjs';
 
 test('sanitized fixture fits the initial module in both appearances', async () => {
@@ -86,7 +86,7 @@ test('preview switches theme, edits module dates, changes month, reveals details
     el(id).dispatchEvent(new Event(type, { bubbles: true }));
   };
   assert.equal(errors.length, 0);
-  assert.equal(document.querySelectorAll('.event').length, 4);
+  assert.equal(document.querySelectorAll('.event').length, 5);
   assert.equal(
     document.querySelector('aside').lastElementChild.classList.contains('export-actions'),
     true,
@@ -105,7 +105,7 @@ test('preview switches theme, edits module dates, changes month, reveals details
   assert.equal(document.querySelectorAll('.event').length, 3);
   change('mode', 'month');
   change('month', '2026-09');
-  assert.equal(document.querySelectorAll('.event').length, 5);
+  assert.equal(document.querySelectorAll('.event').length, 7);
   assert.match(el('wallpaper').innerHTML, /September 2026/);
   assert.doesNotMatch(el('wallpaper').innerHTML, /SATURDAY|SUNDAY/);
   el('weekends').checked = true;
@@ -113,7 +113,6 @@ test('preview switches theme, edits module dates, changes month, reveals details
   assert.match(el('wallpaper').innerHTML, /SATURDAY.*SUNDAY/s);
   assert.match(el('event-list').textContent, /R100/);
   assert.ok(document.querySelector('.conflict'));
-  change('course', 'all', 'change');
   assert.equal(document.querySelectorAll('.event').length, 7);
   change('mode', 'module');
   change('end', '2026-01-01');
@@ -175,8 +174,8 @@ test('event exclusions remain reversible, persist on reload and affect exports',
   input.checked = false;
   input.dispatchEvent(new Event('change'));
   assert.equal(findFinal().checked, false);
-  assert.equal(document.querySelectorAll('.event').length, 4);
-  assert.match(document.getElementById('detail-count').textContent, /3 included · 1 excluded/);
+  assert.equal(document.querySelectorAll('.event').length, 5);
+  assert.match(document.getElementById('detail-count').textContent, /4 included · 1 excluded/);
   assert.doesNotMatch(document.getElementById('wallpaper').innerHTML, /Launch presentation/);
   document.getElementById('theme').value = 'dark';
   document.getElementById('theme').dispatchEvent(new Event('input'));
@@ -194,7 +193,7 @@ test('event exclusions remain reversible, persist on reload and affect exports',
   assert.match(reload.window.document.getElementById('wallpaper').innerHTML, /Launch presentation/);
   assert.match(
     reload.window.document.getElementById('detail-count').textContent,
-    /4 included · 0 excluded/,
+    /5 included · 0 excluded/,
   );
   dom.window.close();
   reload.window.close();
@@ -251,4 +250,215 @@ test('browser preview expands subscriptions when navigating to a distant month',
   assert.match(dom.window.document.getElementById('wallpaper').innerHTML, /Repeating/);
   assert.ok(dom.window.eval("data.events.some(event => event.date.startsWith('2035-09'))"));
   dom.window.close();
+});
+
+test('boxes lighten or darken calendar colors and use the requested theme text colors', async () => {
+  const { data, config } = await loadFixtureApp();
+  for (const theme of ['light', 'dark']) {
+    for (const colorTheme of [...Object.keys(colorThemes), 'custom']) {
+      for (const color of ['#ffffff', '#000000', '#123abc']) {
+        const events = data.events.map((event) => ({ ...event, sourceColor: color }));
+        const options = { ...config, ...config.module, mode: 'module', theme, colorTheme };
+        const plain = renderWallpaper(events, options);
+        const boxed = renderWallpaper(events, { ...options, eventStyle: 'boxes' });
+        assert.deepEqual(
+          boxed.placements.map(({ uid, date }) => ({ uid, date })),
+          plain.placements.map(({ uid, date }) => ({ uid, date })),
+        );
+        assert.deepEqual(boxed.warnings, plain.warnings);
+        const doc = new JSDOM(boxed.svg, { contentType: 'image/svg+xml' }).window.document;
+        const boxes = [...doc.querySelectorAll('rect')].filter(
+          (rect) =>
+            rect.getAttribute('rx') === '5' && rect.getAttribute('fill') !== palettes[theme].tint,
+        );
+        assert.equal(boxes.length, boxed.placements.length);
+        for (const box of boxes) {
+          const fill = box.getAttribute('fill');
+          for (const offset of [1, 3, 5]) {
+            const original = parseInt(color.slice(offset, offset + 2), 16);
+            const neutral = theme === 'dark' ? 0 : 255;
+            const softened = parseInt(fill.slice(offset, offset + 2), 16);
+            assert.equal(softened, Math.round(original * 0.7 + neutral * 0.3));
+          }
+          const next = box.nextElementSibling;
+          const text = next.tagName === 'text' ? next : next.nextElementSibling;
+          if (colorTheme === 'custom') {
+            assert.equal(text.getAttribute('fill'), colorThemes.neutral[theme].text);
+            continue;
+          }
+          if (theme === 'light') {
+            assert.equal(text.getAttribute('fill'), colorThemes[colorTheme].dark.text);
+            continue;
+          }
+          assert.ok(textContrast(text.getAttribute('fill'), fill) >= 4.5);
+        }
+      }
+    }
+  }
+});
+
+test('preview color controls select presets and retain custom colors', async () => {
+  const { preview } = await loadFixtureApp();
+  const dom = new JSDOM(preview, { runScripts: 'dangerously' });
+  const el = (id) => dom.window.document.getElementById(id);
+  const change = (id, value) => {
+    el(id).value = value;
+    el(id).dispatchEvent(new dom.window.Event('input'));
+  };
+  change('color-theme', 'ocean');
+  assert.match(el('wallpaper').innerHTML, /#edf3f8/);
+  change('color-theme', 'custom');
+  assert.equal(el('custom-colors').hidden, false);
+  assert.equal(el('color-light-bg').value, colorThemes.neutral.light.bg);
+  change('color-light-bg', '#abcdef');
+  assert.match(el('wallpaper').innerHTML, /#abcdef/);
+  change('color-theme', 'neutral');
+  assert.equal(el('calendar-colors-field').hidden, false);
+  assert.equal(el('custom-colors').hidden, true);
+  change('color-theme', 'custom');
+  assert.equal(el('color-light-bg').value, '#abcdef');
+  change('theme', 'dark');
+  change('color-dark-bg', '#121212');
+  assert.match(el('wallpaper').innerHTML, /#121212/);
+  dom.window.close();
+});
+
+function textContrast(a, b) {
+  const luminance = (color) => {
+    const channels = color
+      .slice(1)
+      .match(/../g)
+      .map((hex) => {
+        const value = parseInt(hex, 16) / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      });
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  };
+  const values = [luminance(a), luminance(b)];
+  return (Math.max(...values) + 0.05) / (Math.min(...values) + 0.05);
+}
+
+test('custom grid stays readable while event boxes preserve the selected text color', async () => {
+  const { data, config } = await loadFixtureApp();
+  const customColors = {
+    light: { bg: '#f6f1e7', text: '#dfedd2', accent: '#f6f1e7' },
+    dark: { bg: '#202020', text: '#222222', accent: '#202020' },
+  };
+  const saved = structuredClone(customColors);
+  for (const theme of ['light', 'dark']) {
+    for (const eventStyle of ['text', 'boxes']) {
+      const { svg } = renderWallpaper(data.events, {
+        ...config,
+        ...config.module,
+        mode: 'module',
+        theme,
+        eventStyle,
+        colorTheme: 'custom',
+        customColors,
+        today: data.events[0].date,
+      });
+      const dom = new JSDOM(svg, { contentType: 'image/svg+xml' });
+      for (const line of dom.window.document.querySelectorAll('path')) {
+        assert.ok(textContrast(line.getAttribute('stroke'), customColors[theme].bg) >= 1.5);
+      }
+      const backgrounds = [];
+      for (const element of dom.window.document.querySelectorAll('rect, text')) {
+        const n = (key) => Number(element.getAttribute(key));
+        if (element.tagName === 'rect') {
+          backgrounds.push(element);
+          continue;
+        }
+        const background = backgrounds.findLast((rect) => {
+          const x = Number(rect.getAttribute('x')),
+            y = Number(rect.getAttribute('y'));
+          return (
+            n('x') >= x &&
+            n('x') <= x + Number(rect.getAttribute('width')) &&
+            n('y') >= y &&
+            n('y') <= y + Number(rect.getAttribute('height'))
+          );
+        });
+        if (eventStyle === 'boxes' && background.getAttribute('fill') !== customColors[theme].bg) {
+          assert.equal(element.getAttribute('fill'), customColors[theme].text);
+          continue;
+        }
+        assert.ok(
+          textContrast(element.getAttribute('fill'), background.getAttribute('fill')) >= 4.5,
+          `${theme} ${eventStyle}: ${element.textContent}`,
+        );
+      }
+      dom.window.close();
+    }
+  }
+  assert.deepEqual(customColors, saved);
+});
+
+test('snapshot, legend, and event times can be hidden independently', async () => {
+  const { data, config } = await loadFixtureApp();
+  const events = data.events.map((event) => ({
+    ...event,
+    sourceId: 'fixture',
+    sourceName: 'Fixture legend',
+  }));
+  const options = { ...config, ...config.module, mode: 'module', snapshotDate: '2026-09-01' };
+  const render = (patch) => renderWallpaper(events, { ...options, ...patch });
+  const texts = (result) => result.bounds.map((item) => item.text);
+  const normal = render({});
+  assert.ok(texts(normal).includes('Snapshot 2026-09-01'));
+  assert.ok(texts(normal).includes('Fixture legend'));
+  const noSnapshot = render({ showSnapshotDate: false });
+  assert.ok(!texts(noSnapshot).includes('Snapshot 2026-09-01'));
+  assert.equal(noSnapshot.bounds.find((item) => item.text === 'Fixture legend').x, 76);
+  const noLegend = render({ showCalendarLegend: false });
+  assert.ok(!texts(noLegend).includes('Fixture legend'));
+  assert.ok(texts(noLegend).includes('Snapshot 2026-09-01'));
+  const times = texts(normal).filter((text) => /^\d{2}:\d{2}/.test(text));
+  assert.ok(times.length > 0);
+  for (const eventStyle of ['text', 'boxes']) {
+    for (const rooms of [true, false]) {
+      const hidden = render({ showEventTimes: false, eventStyle, rooms });
+      assert.ok(times.every((time) => !texts(hidden).includes(time)));
+      assert.equal(hidden.grid.visible.length, normal.grid.visible.length);
+      assert.ok(hidden.bounds.every((item) => Number.isFinite(item.x) && Number.isFinite(item.y)));
+      if (!rooms) {
+        const shown = render({ eventStyle, rooms });
+        assert.ok(hidden.placements[0].bottom < shown.placements[0].bottom);
+      }
+    }
+  }
+});
+
+test('event titles keep their top inset when times and locations are hidden', async () => {
+  const { data, config } = await loadFixtureApp();
+  for (const eventTextScale of [0.75, 1, 1.5]) {
+    const result = renderWallpaper(data.events, {
+      ...config,
+      ...config.module,
+      mode: 'module',
+      eventStyle: 'boxes',
+      showEventTimes: false,
+      rooms: false,
+      eventTextScale,
+    });
+    const dom = new JSDOM(result.svg, { contentType: 'image/svg+xml' });
+    const boxes = [...dom.window.document.querySelectorAll('rect[rx="5"]')];
+    let checked = 0;
+    for (const box of boxes) {
+      let title = box.nextElementSibling;
+      if (title?.tagName === 'rect') title = title.nextElementSibling;
+      if (
+        title?.tagName !== 'text' ||
+        Number(title.getAttribute('font-size')) !== 14 * eventTextScale
+      )
+        continue;
+      const inset =
+        Number(title.getAttribute('y')) -
+        Number(title.getAttribute('font-size')) -
+        Number(box.getAttribute('y'));
+      assert.ok(Math.abs(inset - 2) < 0.001, `Title top inset is ${inset}`);
+      checked++;
+    }
+    assert.ok(checked > 0);
+    dom.window.close();
+  }
 });

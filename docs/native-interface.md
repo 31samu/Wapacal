@@ -57,6 +57,10 @@ Both `.wapacal` and legacy `.timetable` imports, paired HEIC files, the existing
 
 The browser preview remains a separate development and compatibility tool. It is neither bundled nor opened by the app. Its browser-local preferences remain separate from the app's existing saved state.
 
+## Applied wallpaper files
+
+Applied HEIC filenames include a hash of their contents. Different images never overwrite a previously used wallpaper URL, so macOS cannot reuse an older render for new content. Identical files share a URL. Cleanup keeps ten inactive images plus images selected on connected displays or referenced by restoration records. Older per-display files are retained. This favors reliable updates over limiting entries in System Settings' “Your Photos” list; deleting local files does not promise to remove those entries.
+
 ## Verification
 
 `scripts/native-compile.mjs` compiles the production Swift files together with an explicit `main.swift` entry point. The app and native tests use this same compiler helper; neither extracts or replaces Swift source text.

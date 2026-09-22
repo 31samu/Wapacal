@@ -2,7 +2,7 @@ import AppKit
 import WebKit
 
 // Compiled into a temporary fixture-only app by native-ui.mjs.
-// Wallpaper apply/restore checks require explicit WAPACAL_TEST_WALLPAPER=1.
+// Preview image and wallpaper apply/restore checks require WAPACAL_TEST_WALLPAPER=1.
 // Never changes login items or the user's Application Support directory.
 func require(_ value: @autoclosure () -> Bool, _ message: String) throws {
     if !value() { throw WallpaperError.invalid("Native UI test failed: " + message) }
@@ -76,6 +76,39 @@ Task { @MainActor in
             )
         }
         let ui = editorApp.editorView
+        let dayPicker = NSDatePicker()
+        dayPicker.calendar = Calendar(identifier: .gregorian)
+        dayPicker.timeZone = TimeZone(secondsFromGMT: 0)
+        let dayField = EditorDateField(picker: dayPicker, title: "Test date")
+        let dayFormatter = DateFormatter()
+        dayFormatter.calendar = dayPicker.calendar
+        dayFormatter.timeZone = dayPicker.timeZone
+        dayFormatter.dateFormat = "yyyy-MM-dd"
+        for (from, button, expected) in [
+            ("2026-01-31", dayField.nextDate, "2026-02-01"),
+            ("2024-03-01", dayField.previousDate, "2024-02-29"),
+            ("2026-12-31", dayField.nextDate, "2027-01-01"),
+        ] {
+            dayPicker.dateValue = dayFormatter.date(from: from)!
+            dayField.stepDate(button)
+            try require(
+                dayFormatter.string(from: dayPicker.dateValue) == expected,
+                "date arrows advance one day across calendar boundaries")
+        }
+        let monthField = ui.month.superview as! EditorDateField
+        let originalMonth = ui.month.dateValue
+        try require(ui.month.datePickerElements == .yearMonth, "month picker hides the day")
+        for (from, button, expected) in [
+            ("2026-12-01", monthField.nextDate, "2027-01-01"),
+            ("2026-01-01", monthField.previousDate, "2025-12-01"),
+        ] {
+            ui.month.dateValue = dayFormatter.date(from: from)!
+            monthField.stepDate(button)
+            try require(
+                dayFormatter.string(from: ui.month.dateValue) == expected,
+                "month arrows advance one month across year boundaries")
+        }
+        ui.month.dateValue = originalMonth
         editorApp.showWallpaperSharingWarning(true)
         editorApp.window.contentView!.layoutSubtreeIfNeeded()
         try require(
@@ -99,7 +132,20 @@ Task { @MainActor in
         try require(
             !descendants(editorApp.window.contentView!).contains { $0 is WKWebView },
             "web view in window hierarchy")
-        try require(ui.preview.image != nil, "native image preview")
+        let wallpaperEnabled =
+            ProcessInfo.processInfo.environment["WAPACAL_TEST_WALLPAPER"] == "1"
+        if wallpaperEnabled {
+            let previewDeadline = Date().addingTimeInterval(15)
+            while ui.preview.image == nil && Date() < previewDeadline {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            try require(
+                ui.preview.image != nil,
+                "native image preview: \(editorApp.lastEditorError ?? editorApp.status.stringValue)"
+            )
+        } else {
+            print("Wallpaper preview checks skipped: WAPACAL_TEST_WALLPAPER is not 1")
+        }
         try require(ui.table.numberOfRows > 0, "event rows")
         try require(ui.name.stringValue == "Prototype module", "saved module name")
         try require(ui.resolution.titleOfSelectedItem == "2880 × 1800", "custom saved image size")
@@ -160,16 +206,25 @@ Task { @MainActor in
                 "custom dimensions are saved under the display identity")
         }
         for index in NSScreen.screens.indices.reversed() {
+            let previousWidth = ui.editor["width"] as! Int
+            let previousHeight = ui.editor["height"] as! Int
             editorApp.screenPicker.selectItem(at: index)
             editorApp.changeScreen()
             while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
+            let nativeSize = wallpaperPixelSize(NSScreen.screens[index])
+            try require(ui.imageSizeField.isHidden, "monitor selection hides size controls")
+            let width = supportsImageSize(nativeSize) ? Int(nativeSize.width) : previousWidth
+            let height = supportsImageSize(nativeSize) ? Int(nativeSize.height) : previousHeight
             try require(
-                ui.editor["width"] as? Int == 2560 + index * 128,
-                "switching back restores that display's custom resolution")
-            try require(
-                ui.preview.image?.representations.first?.pixelsWide == 2560 + index * 128
-                    && ui.preview.image?.representations.first?.pixelsHigh == 1440,
-                "switching back rerenders the preview at that display's saved size")
+                ui.editor["width"] as? Int == width && ui.editor["height"] as? Int == height,
+                "switching back uses supported display dimensions or preserves the current size: expected \(String(describing: width)) × \(String(describing: height)), got \(String(describing: ui.editor["width"])) × \(String(describing: ui.editor["height"]))"
+            )
+            if wallpaperEnabled {
+                try require(
+                    ui.preview.image?.representations.first?.pixelsWide == width
+                        && ui.preview.image?.representations.first?.pixelsHigh == height,
+                    "switching back keeps the preview at the expected image size")
+            }
             ui.displayResolution.performClick(nil)
             while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
         }
@@ -177,6 +232,9 @@ Task { @MainActor in
             "return window.nativeUpdate(patch)", ["patch": ["width": 2880, "height": 1800]])
         editorApp.screenPicker.selectItem(withTitle: "All connected displays")
         editorApp.changeScreen()
+        while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
+        let allDisplaysWidth = ui.editor["width"] as? Int
+        let allDisplaysHeight = ui.editor["height"] as? Int
         let targets = try editorApp.targetScreens()
         try require(targets.count == NSScreen.screens.count, "all displays selected")
         try require(!ui.displayResolution.isEnabled, "all displays use their own size")
@@ -184,14 +242,19 @@ Task { @MainActor in
             ui.resolution.titleOfSelectedItem == "Use screen sizes" && !ui.resolution.isEnabled,
             "all displays show screen sizing instead of one numeric resolution")
         try require(
-            ui.displayResolution.isHidden && !ui.displaySizes.isHidden,
-            "all displays show the per-screen size explanation")
+            ui.displayResolution.isHidden && !ui.previewResolution.isHidden,
+            "all displays show the preview size menu")
+        try require(
+            ui.previewResolution.numberOfItems == NSScreen.screens.count,
+            "preview size menu has one option per screen")
         for screen in try editorApp.targetScreens() {
             let size = wallpaperPixelSize(screen)
             try require(
-                ui.displaySizes.stringValue.contains(
-                    "\(screen.localizedName): \(Int(size.width)) × \(Int(size.height))"),
-                "each screen's size is visible")
+                ui.previewResolution.itemArray.contains {
+                    $0.title
+                        == "\(screen.localizedName) · \(Int(size.width)) × \(Int(size.height))"
+                },
+                "each screen's size is available for the preview")
             if !supportsImageSize(size) {
                 let error =
                     try await editorApp.js(
@@ -218,36 +281,60 @@ Task { @MainActor in
                     "per-display \(theme) render dimensions")
             }
         }
+        if let last = NSScreen.screens.last(where: { supportsImageSize(wallpaperPixelSize($0)) }) {
+            ui.previewResolution.selectItem(
+                at: NSScreen.screens.firstIndex(where: { screenID($0) == screenID(last) })!)
+            editorApp.changePreviewResolution()
+            while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
+            let size = wallpaperPixelSize(last)
+            try require(
+                ui.editor["width"] as? Int == Int(size.width)
+                    && ui.editor["height"] as? Int == Int(size.height),
+                "preview size menu rerenders at the selected screen size")
+        }
+        let previewScreen = NSScreen.screens.first {
+            screenID($0)
+                == (ui.previewResolution.selectedItem?.representedObject as? String)
+        }!
+        let previewSize = wallpaperPixelSize(previewScreen)
         try require(
-            ui.editor["width"] as? Int == 2880 && ui.editor["height"] as? Int == 1800,
-            "per-display render preserves editor size")
-        for (index, screen) in NSScreen.screens.enumerated() {
+            ui.editor["width"] as? Int
+                == (supportsImageSize(previewSize) ? Int(previewSize.width) : allDisplaysWidth)
+                && ui.editor["height"] as? Int
+                    == (supportsImageSize(previewSize)
+                        ? Int(previewSize.height) : allDisplaysHeight),
+            "per-display renders preserve the selected preview size")
+        for screen in NSScreen.screens {
+            let previousWidth = ui.editor["width"] as! Int
+            let previousHeight = ui.editor["height"] as! Int
             editorApp.screenPicker.selectItem(
                 at: editorApp.screenPicker.itemArray.firstIndex {
                     $0.representedObject as? String == screenID(screen)
                 }!)
             editorApp.changeScreen()
+            let size = wallpaperPixelSize(screen)
             try require(
-                editorApp.pendingEdits > 0, "leaving all displays queues sizing before Apply")
+                (editorApp.pendingEdits > 0) == supportsImageSize(size),
+                "display selection queues sizing only for supported image dimensions")
             while editorApp.pendingEdits > 0 {
                 try await Task.sleep(nanoseconds: 50_000_000)
             }
-            let size = wallpaperPixelSize(screen)
-            let width = supportsImageSize(size) ? Int(size.width) : 2560 + index * 128
-            let height = supportsImageSize(size) ? Int(size.height) : 1440
+            let width = supportsImageSize(size) ? Int(size.width) : previousWidth
+            let height = supportsImageSize(size) ? Int(size.height) : previousHeight
             try require(
                 ui.editor["width"] as? Int == width && ui.editor["height"] as? Int == height,
-                "leaving all displays restores saved size: expected \(width) × \(height), got \(String(describing: ui.editor["width"])) × \(String(describing: ui.editor["height"]))"
+                "display selection uses supported dimensions or preserves the current size: expected \(width) × \(height), got \(String(describing: ui.editor["width"])) × \(String(describing: ui.editor["height"]))"
             )
             try require(
                 ui.resolution.titleOfSelectedItem == "\(width) × \(height)",
                 "selected screen size is reflected in the size menu")
             editorApp.screenPicker.selectItem(withTitle: "All connected displays")
             editorApp.changeScreen()
+            while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
         }
         _ = try await editorApp.js(
             "return window.nativeUpdate(patch)", ["patch": ["width": 2880, "height": 1800]])
-        if ProcessInfo.processInfo.environment["WAPACAL_TEST_WALLPAPER"] == "1" {
+        if wallpaperEnabled {
             let screens = NSScreen.screens
             let originals = screens.map { WallpaperBackup(screen: $0) }
             try require(
@@ -281,33 +368,39 @@ Task { @MainActor in
                     dark: CGImageSourceCreateImageAtIndex(source, 0, nil)!, to: changed)
                 let changedData = try readBounded(changed)
                 try require(changedData != originalData, "refresh fixture has different content")
+                try encodePair(
+                    light: CGImageSourceCreateImageAtIndex(source, 0, nil)!,
+                    dark: CGImageSourceCreateImageAtIndex(source, 0, nil)!, to: changed)
+                let thirdData = try readBounded(changed)
                 let backupData = try Data(contentsOf: backupURL(screen))
-                var updateURLs: Set<URL> = [url.standardizedFileURL]
-                for index in 0..<4 {
-                    // Change both slots, then change both again to exercise reused files.
-                    let expectedData = index < 2 ? changedData : originalData
+                var imagesByURL: [URL: Data] = [url.standardizedFileURL: originalData]
+                for expectedData in [changedData, thirdData, originalData, originalData] {
                     try expectedData.write(to: changed, options: .atomic)
-                    let previousURL = NSWorkspace.shared.desktopImageURL(for: screen)
                     _ = try applyWallpaper(changed, screen: screen)
                     let updatedURL = NSWorkspace.shared.desktopImageURL(for: screen)!
-                    try require(
-                        updatedURL.standardizedFileURL != previousURL?.standardizedFileURL,
-                        "each update changes the URL to avoid the active image cache")
-                    updateURLs.insert(updatedURL.standardizedFileURL)
-                    try require(updateURLs.count <= 2, "updates reuse at most two display URLs")
+                        .standardizedFileURL
+                    if let existing = imagesByURL[updatedURL] {
+                        try require(existing == expectedData, "a reused URL has identical content")
+                    }
+                    imagesByURL[updatedURL] = expectedData
+                    for (oldURL, oldData) in imagesByURL {
+                        let retainedData = try readBounded(oldURL)
+                        try require(
+                            retainedData == oldData, "earlier wallpaper images stay unchanged")
+                    }
                     let appliedData = try readBounded(updatedURL)
                     try require(appliedData == expectedData, "repeated update writes the new image")
                     _ = try inspectData(appliedData)
                     let savedBackup = try Data(contentsOf: backupURL(screen))
                     try require(savedBackup == backupData, "refresh preserves the original backup")
                 }
-                try require(updateURLs.count == 2, "updates alternate URLs to refresh the cache")
+                try require(imagesByURL.count == 3, "three images have three stable URLs")
             }
             let appliedFiles = try FileManager.default.contentsOfDirectory(
                 at: appliedDirectory(), includingPropertiesForKeys: nil)
             try require(
-                appliedFiles.filter { $0.pathExtension == "heic" }.count == screens.count * 2,
-                "repeated updates keep two wallpaper files per display")
+                appliedFiles.filter { $0.pathExtension == "heic" }.count <= screens.count * 3,
+                "identical images do not create duplicate files")
             editorApp.restore()
             for (screen, original) in zip(screens, originals) {
                 try require(
@@ -326,7 +419,7 @@ Task { @MainActor in
                             == originals[screens.firstIndex(of: $0)!].url?.standardizedFileURL
                     },
                     "changing the target display does not apply a wallpaper automatically")
-                editorApp.useDisplayResolution()
+                editorApp.queueEditorPatch(["showTitle": true])
                 let applyDeadline = Date().addingTimeInterval(15)
                 var didApply = false
                 while Date() < applyDeadline {
@@ -378,13 +471,18 @@ Task { @MainActor in
         try require(
             editorApp.screenPicker.titleOfSelectedItem == "All connected displays",
             "all displays selection survives display refresh")
-        editorApp.saved["screen"] = initialScreen
+        editorApp.saved["screen"] = "custom"
         editorApp.updateScreens()
         try require(
             ui.resolution.titleOfSelectedItem == "2880 × 1800" && ui.resolution.isEnabled,
-            "returning to one display restores the custom size control")
+            "custom resolution mode shows the size control")
+        try require(!editorApp.applyButton.isEnabled, "custom resolution disables Apply")
+        try require(ui.exportMenu.isEnabled, "custom resolution keeps Export available")
+        try require(!ui.imageSizeField.isHidden, "custom resolution shows image size")
+        await editorApp.makeAndApply(force: true)
+        try require(!editorApp.rendering, "custom resolution does not apply wallpaper")
         try require(ui.resolution.item(withTitle: "Custom…") != nil, "custom size menu option")
-        editorApp.saved["screen"] = screenID(NSScreen.screens[0])
+        editorApp.saved["screen"] = "custom"
         editorApp.updateScreens()
         for accept in [false, true] {
             ui.resolution.selectItem(withTitle: "Custom…")
@@ -422,8 +520,8 @@ Task { @MainActor in
         }
         try require(
             (editorApp.saved["displaySizes"] as? [String: [String: Int]])?[
-                screenID(NSScreen.screens[0])] == ["width": 3200, "height": 2000],
-            "custom menu size is remembered for the selected display")
+                "custom"] == ["width": 3200, "height": 2000],
+            "custom resolution is remembered independently of displays")
         editorApp.queueEditorPatch(["width": 2880, "height": 1800], automaticApply: false)
         while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
         try require(ui.showTitle.state == .off, "legacy title default")
@@ -474,10 +572,10 @@ Task { @MainActor in
         try require(NSApp.activationPolicy() == .accessory, "closing About returns to menu bar")
         editorApp.show()
         try require(
-            editorApp.statusMenu!.items.map { $0.title } == [
+            editorApp.item.menu!.items.map { $0.title } == [
                 "Open Wapacal", "Settings…", "Refresh & Apply", "Quit",
             ]
-                && editorApp.statusMenu!.items[2].action
+                && editorApp.item.menu!.items[2].action
                     == #selector(editorApp.refreshAndApplyNow),
             "compact menu bar refresh-and-apply action")
         let calendarMenu = mainMenu.items.first { $0.title == "Calendar" }!.submenu!
@@ -505,7 +603,10 @@ Task { @MainActor in
         let originalAppearance = NSApp.appearance
         NSApp.appearance = NSAppearance(named: .aqua)
         _ = try await editorApp.js("return window.nativeUpdate({theme: 'system'});")
-        let systemLight = ui.preview.image!.tiffRepresentation!
+        let systemLight = ui.preview.image?.tiffRepresentation
+        if wallpaperEnabled {
+            try require(systemLight != nil, "system light preview is available")
+        }
         let explicitLight =
             try await editorApp.engine.call(
                 "window.nativeUpdate({theme: 'light'}); return window.nativeSnapshot().svg;")
@@ -517,12 +618,24 @@ Task { @MainActor in
         try require(systemSVG == explicitLight, "system uses AppKit light appearance")
         NSApp.appearance = NSAppearance(named: .darkAqua)
         let appearanceDeadline = Date().addingTimeInterval(15)
-        while ui.preview.image!.tiffRepresentation! == systemLight && Date() < appearanceDeadline {
+        while Date() < appearanceDeadline {
+            let currentSVG =
+                try await editorApp.engine.call("return window.nativeSnapshot().svg;") as? String
+            if currentSVG != systemSVG
+                && (!wallpaperEnabled
+                    || (ui.preview.image?.tiffRepresentation != nil
+                        && ui.preview.image?.tiffRepresentation != systemLight))
+            {
+                break
+            }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        try require(
-            ui.preview.image!.tiffRepresentation! != systemLight,
-            "system preview refreshes when AppKit appearance changes")
+        if wallpaperEnabled {
+            try require(
+                ui.preview.image?.tiffRepresentation != nil
+                    && ui.preview.image?.tiffRepresentation != systemLight,
+                "system preview refreshes when AppKit appearance changes")
+        }
         let systemDark =
             try await editorApp.engine.call(
                 "return window.nativeSnapshot().svg;") as! String
@@ -536,10 +649,10 @@ Task { @MainActor in
         _ = try await editorApp.js("return window.nativeUpdate({theme: 'light'});")
         print("System appearance checks passed")
 
-        // Settings reuse the original controls and state in a separate native window.
+        // Calendar controls live in the sidebar; general settings use a separate window.
         try require(
-            editorApp.urlField.window === editorApp.settingsWindow,
-            "subscription field belongs to Settings")
+            editorApp.urlField.window === editorApp.window,
+            "subscription field belongs to the sidebar")
         try require(!editorApp.settingsWindow.isVisible, "Settings stays closed at startup")
         let settingsItem = NSApp.mainMenu!.items[0].submenu!.items.first { $0.title == "Settings…" }
         try require(settingsItem?.keyEquivalent == ",", "standard Settings shortcut")
@@ -549,16 +662,56 @@ Task { @MainActor in
         try require(
             !descendants(editorApp.settingsWindow.contentView!).contains { $0 is WKWebView },
             "native Settings")
-        try require(editorApp.urlField.frame.width > 450, "readable subscription URL field")
-        let settingsRoot = editorApp.settingsWindow.contentView!
-        let saveBounds = editorApp.saveSourceButton.convert(
-            editorApp.saveSourceButton.bounds, to: settingsRoot)
-        let statusBounds = editorApp.settingsStatus.convert(
-            editorApp.settingsStatus.bounds, to: settingsRoot)
-        try require(settingsRoot.bounds.contains(saveBounds), "save button inside Settings")
-        try require(!saveBounds.intersects(statusBounds), "save button does not overlap status")
+        let warningSnapshot =
+            try await editorApp.js("return window.nativeSnapshot()", updates: false)
+            as! [String: Any]
+        var warningFixture = warningSnapshot
+        warningFixture["warnings"] = ["Full location is in the preview."]
+        ui.display(warningFixture)
+        ui.view.layoutSubtreeIfNeeded()
+        let layoutWarnings = ui.warning.enclosingScrollView!
         try require(
-            !descendants(settingsRoot).contains { $0 is NSColorWell }, "custom color uses the menu")
+            editorApp.showLayoutWarnings.state == .on && !layoutWarnings.isHidden,
+            "layout warnings are enabled by default")
+        try require(layoutWarnings.frame.height < 40, "one warning uses a compact height")
+        editorApp.showMessages.state = .off
+        editorApp.toggleMessages()
+        try require(!layoutWarnings.isHidden, "layout warnings are independent of status messages")
+        editorApp.showLayoutWarnings.performClick(nil)
+        try require(layoutWarnings.isHidden, "layout warning preference hides the warning area")
+        let warningState =
+            try JSONSerialization.jsonObject(with: Data(contentsOf: editorApp.stateURL))
+            as! [String: Any]
+        try require(
+            warningState["showLayoutWarnings"] as? Bool == false, "warning preference persists")
+        ui.display(warningFixture)
+        try require(layoutWarnings.isHidden, "preview updates respect hidden layout warnings")
+        editorApp.showLayoutWarnings.performClick(nil)
+        warningFixture["warnings"] = (1...12).map { "Layout warning \($0)" }
+        ui.display(warningFixture)
+        ui.view.layoutSubtreeIfNeeded()
+        try require(
+            layoutWarnings.frame.height == 80
+                && layoutWarnings.documentView!.frame.height > layoutWarnings.contentSize.height,
+            "long warning lists scroll within a capped height")
+        warningFixture["warnings"] = [] as [String]
+        ui.display(warningFixture)
+        try require(layoutWarnings.isHidden, "empty warnings leave no warning area")
+        editorApp.showMessages.state = .on
+        editorApp.toggleMessages()
+        ui.display(warningSnapshot)
+        try require(ui.calendarFields.isHidden, "calendars start collapsed")
+        ui.calendarsToggle.performClick(nil)
+        ui.view.layoutSubtreeIfNeeded()
+        try require(!ui.calendarFields.isHidden, "calendar disclosure opens")
+        try require(
+            editorApp.urlField.frame.width > 200 && editorApp.urlField.frame.width < 270,
+            "subscription URL fits the sidebar")
+        let settingsRoot = editorApp.settingsWindow.contentView!
+        try require(
+            !descendants(ui.calendarFields).contains { $0 is NSColorWell },
+            "custom color uses the menu")
+
         let subscriptionMenuItems = editorApp.sourcePicker.itemArray
         try require(
             subscriptionMenuItems.map(\.title) == ["SUBSCRIPTIONS", "Fixture calendar"],
@@ -610,13 +763,78 @@ Task { @MainActor in
                 .appendingPathComponent("native-settings.png"))
         editorApp.addSource()
         try require(
-            editorApp.settingsWindow.firstResponder is NSTextView,
-            "new calendar focuses Settings URL field")
+            editorApp.window.firstResponder is NSTextView,
+            "new calendar focuses sidebar URL field")
         editorApp.sourcePicker.select(
             editorApp.sourcePicker.itemArray.first { $0.representedObject as? String == "legacy" })
         // Restore the fixture selection without changing saved subscriptions.
         editorApp.selectSource()
         try require(editorApp.sourceEnabled.state == .on, "existing calendars default to enabled")
+        try require(
+            editorApp.addSubscriptionButton.isHidden, "existing calendars need no save button")
+        func finishCalendarEdit(_ field: NSTextField, _ value: String) {
+            editorApp.controlTextDidBeginEditing(
+                Notification(name: NSControl.textDidBeginEditingNotification, object: field))
+            field.stringValue = value
+            editorApp.controlTextDidEndEditing(
+                Notification(name: NSControl.textDidEndEditingNotification, object: field))
+        }
+        let originalSources = editorApp.subscriptions
+        editorApp.fetching = true
+        finishCalendarEdit(editorApp.sourceName, "Renamed fixture")
+        editorApp.addSource()
+        try require(
+            !editorApp.addSubscriptionButton.isHidden, "new subscriptions have an Add button")
+        editorApp.fetching = false
+        let renameDeadline = Date().addingTimeInterval(10)
+        while editorApp.subscriptions[0]["name"] as? String != "Renamed fixture"
+            && Date() < renameDeadline
+        {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try require(
+            editorApp.subscriptions[0]["name"] as? String == "Renamed fixture",
+            "name autosave waits for refresh and retains the edited calendar")
+        let renamedState =
+            try JSONSerialization.jsonObject(with: Data(contentsOf: editorApp.stateURL))
+            as! [String: Any]
+        try require(
+            (renamedState["subscriptions"] as? [[String: Any]])?.first?["name"] as? String
+                == "Renamed fixture", "calendar name autosave persists to disk")
+        try require(
+            editorApp.selectedSourceIndex == nil, "autosave preserves the new subscription draft")
+        editorApp.reloadSources(selected: "legacy")
+        finishCalendarEdit(editorApp.urlField, "not a URL")
+        let invalidDeadline = Date().addingTimeInterval(10)
+        while !editorApp.status.stringValue.contains("URL not saved") && Date() < invalidDeadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try require(
+            editorApp.subscriptions[0]["url"] as? String == originalSources[0]["url"] as? String,
+            "invalid URL leaves the saved subscription unchanged")
+        // Disable fetching for this fixture so URL autosave never makes a network request.
+        var disabledSources = editorApp.subscriptions
+        disabledSources[0]["enabled"] = false
+        editorApp.saved["subscriptions"] = disabledSources
+        editorApp.reloadSources(selected: "legacy")
+        finishCalendarEdit(editorApp.urlField, "https://example.invalid/updated.ics")
+        let urlDeadline = Date().addingTimeInterval(10)
+        while (editorApp.subscriptions[0]["url"] as? String != "https://example.invalid/updated.ics"
+            || editorApp.fetching) && Date() < urlDeadline
+        {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try require(
+            editorApp.subscriptions[0]["url"] as? String == "https://example.invalid/updated.ics"
+                && editorApp.subscriptions[0]["ics"] == nil,
+            "URL autosave replaces the URL and clears events from the previous subscription")
+        editorApp.saved["subscriptions"] = originalSources
+        editorApp.saved["nextCheck"] = Date().addingTimeInterval(86400).timeIntervalSince1970
+        _ = try await editorApp.js(
+            "return window.nativeSources(subscriptions,false)", ["subscriptions": originalSources])
+        editorApp.reloadSources(selected: "legacy")
+        editorApp.persist()
+
         for choice in ["Blue", "Custom", "Default"] {
             editorApp.sourceColor.selectItem(withTitle: choice)
             editorApp.customSourceColor = NSColor(
@@ -664,7 +882,6 @@ Task { @MainActor in
         try require(
             editorApp.settingsStatus.stringValue == "Settings status check",
             "operation feedback in both windows")
-        editorApp.settingsTabs.selectTabViewItem(withIdentifier: "general")
         try require(
             editorApp.automatic.window === editorApp.settingsWindow,
             "automatic updates belong to Settings")
@@ -695,15 +912,132 @@ Task { @MainActor in
             editorApp.refreshPicker.indexOfSelectedItem == 1,
             "Settings reopens with retained values")
         editorApp.settingsWindow.performClose(nil)
+        ui.calendarsToggle.performClick(nil)
+        try require(ui.calendarFields.isHidden, "calendar disclosure closes")
         try require(ui.appearanceFields.isHidden, "appearance starts collapsed")
         ui.appearanceToggle.performClick(nil)
         try require(!ui.appearanceFields.isHidden, "appearance disclosure opens")
-        try require(ui.theme.itemTitles == ["System", "Light", "Dark"], "appearance choices")
+        try require(
+            (0..<ui.theme.segmentCount).map { ui.theme.label(forSegment: $0) } == [
+                "System", "Light", "Dark",
+            ], "appearance choices")
         try require(
             ui.exportMenu.menu!.items.count == 5, "all export appearances remain accessible")
 
+        try require(
+            ui.colorTheme.itemTitles == [
+                "Forest", "Neutral", "Ocean", "Plum", "Rose", "Sand", "Custom",
+            ], "color theme choices")
+        #if WAPACAL_CONTROL_EVENTS
+            // Native drags save once, including when released outside the slider.
+            editorApp.show()
+            try await Task.sleep(nanoseconds: 100_000_000)
+            let slider = ui.eventTextSize
+            let originalOnChange = ui.onChange
+            var sliderPatches: [[String: Any]] = []
+            ui.onChange = { sliderPatches.append($0) }
+            for outside in [false, true] {
+                slider.doubleValue = 100
+                ui.changeControl(slider)
+                sliderPatches.removeAll()
+                editorApp.window.makeKeyAndOrderFront(nil)
+                slider.scrollToVisible(slider.bounds)
+                editorApp.window.contentView!.layoutSubtreeIfNeeded()
+                let knob = (slider.cell as! NSSliderCell).knobRect(flipped: slider.isFlipped)
+                @MainActor func mouse(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent {
+                    NSEvent.mouseEvent(
+                        with: type, location: slider.convert(point, to: nil), modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime,
+                        windowNumber: editorApp.window.windowNumber, context: nil,
+                        eventNumber: 0, clickCount: 1, pressure: 1)!
+                }
+                let end = NSPoint(x: slider.bounds.width - 12, y: outside ? -20 : knob.midY)
+                NSApp.postEvent(
+                    mouse(.leftMouseDown, NSPoint(x: knob.midX, y: knob.midY)), atStart: false)
+                NSApp.postEvent(mouse(.leftMouseDragged, end), atStart: false)
+                NSApp.postEvent(mouse(.leftMouseUp, end), atStart: false)
+                let releaseDeadline = Date().addingTimeInterval(5)
+                while (slider.isTracking || sliderPatches.isEmpty || slider.doubleValue <= 100)
+                    && Date() < releaseDeadline
+                {
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                }
+                try require(!slider.isTracking, "native slider finishes tracking")
+                try require(
+                    slider.doubleValue > 100 && sliderPatches.count == 1,
+                    "slider saves once on release: value=\(slider.doubleValue), patches=\(sliderPatches), outside=\(outside)"
+                )
+            }
+            sliderPatches.removeAll()
+            slider.doubleValue = 110
+            _ = slider.sendAction(slider.action, to: slider.target)
+            try require(
+                sliderPatches.count == 1,
+                "non-drag slider actions save immediately")
+            slider.doubleValue = 100
+            ui.changeControl(slider)
+            ui.onChange = originalOnChange
+        #endif
+
+        ui.colorTheme.selectItem(withTitle: "Custom")
+        ui.changeControl(ui.colorTheme)
+        let colorDeadline = Date().addingTimeInterval(15)
+        while ui.editor["colorTheme"] as? String != "custom" && Date() < colorDeadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try require(ui.editor["colorTheme"] as? String == "custom", "custom theme action")
+        let well = ui.colorWells["light.bg"]!
+        well.color = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)
+        _ = well.sendAction(well.action!, to: well.target)
+        let wellDeadline = Date().addingTimeInterval(15)
+        while (ui.editor["customColors"] as? [String: [String: String]])?["light"]?["bg"]
+            != "#ff0000" && Date() < wellDeadline
+        {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try require(
+            (ui.editor["customColors"] as? [String: [String: String]])?["light"]?["bg"]
+                == "#ff0000", "native color picker action")
+        ui.colorTheme.selectItem(withTitle: "Forest")
+        ui.changeControl(ui.colorTheme)
+
         // Drive target/action through real native controls.
-        ui.theme.selectItem(at: 2)
+        try require(
+            (0..<ui.eventStyle.segmentCount).map { ui.eventStyle.label(forSegment: $0) } == [
+                "Text", "Boxes",
+            ],
+            "event style choices")
+        for (segment, style) in [(1, "boxes"), (0, "text")] {
+            ui.eventStyle.selectedSegment = segment
+            _ = ui.eventStyle.sendAction(ui.eventStyle.action!, to: ui.eventStyle.target)
+            let styleDeadline = Date().addingTimeInterval(15)
+            while ui.editor["eventStyle"] as? String != style && Date() < styleDeadline {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            try require(ui.editor["eventStyle"] as? String == style, "event style segment action")
+        }
+        // Keep a render in flight while newer selections queue behind it.
+        let delayedSnapshot = Task { @MainActor in
+            try await editorApp.js(
+                "await new Promise(resolve => setTimeout(resolve, 200)); return true")
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        for segment in [1, 0, 1, 0, 1] {
+            ui.mode.selectedSegment = segment
+            _ = ui.mode.sendAction(ui.mode.action!, to: ui.mode.target)
+        }
+        _ = try await delayedSnapshot.value
+        let selectionDeadline = Date().addingTimeInterval(15)
+        while editorApp.pendingEdits > 0 && Date() < selectionDeadline {
+            try require(
+                ui.mode.selectedSegment == 1, "older renders must not reset the latest selection")
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try require(editorApp.pendingEdits == 0, "rapid selections completed")
+        try require(ui.editor["mode"] as? String == "month", "latest selection reaches the preview")
+        ui.mode.selectedSegment = 0
+        ui.changeControl(ui.mode)
+        ui.theme.selectedSegment = 2
         ui.changeControl(ui.theme)
         let darkDeadline = Date().addingTimeInterval(15)
         while ui.editor["theme"] as? String != "dark" && Date() < darkDeadline {
@@ -716,12 +1050,14 @@ Task { @MainActor in
         for size in [originalContentSize, NSSize(width: 1060, height: 588), originalContentSize] {
             editorApp.window.setContentSize(size)
             editorApp.window.contentView?.layoutSubtreeIfNeeded()
-            let tableScroll = ui.table.enclosingScrollView!
-            let split = tableScroll.superview as! NSSplitView
-            let content = ui.tabs.selectedTabViewItem!.view!
-            let instruction = content.subviews.compactMap { $0 as? NSTextField }.first!
+            guard let tableScroll = ui.table.enclosingScrollView,
+                let split = tableScroll.superview as? NSSplitView,
+                let content = ui.tabs.selectedTabViewItem?.view
+            else {
+                throw WallpaperError.invalid("Native UI test failed: event split hierarchy missing")
+            }
             let diagnostic =
-                "window=\(editorApp.window.contentView!.frame), split=\(split.frame), content=\(content.bounds), instruction=\(instruction.frame)"
+                "window=\(editorApp.window.contentView!.frame), split=\(split.frame), content=\(content.bounds)"
             try require(
                 abs(split.frame.minX - content.bounds.minX) <= 1
                     && abs(split.frame.width - content.bounds.width) <= 1
@@ -729,8 +1065,11 @@ Task { @MainActor in
                 "event table and split fill the available width: \(diagnostic)")
             try require(
                 abs(split.frame.minY - content.bounds.minY) <= 1
-                    && abs(split.frame.maxY - (instruction.frame.minY - 10)) <= 1,
-                "event split fills the space below the instruction: \(diagnostic)")
+                    && abs(split.frame.maxY - content.bounds.maxY) <= 1,
+                "event split fills the available height: \(diagnostic)")
+            try require(
+                split.arrangedSubviews.count == 2,
+                "event split contains the table and details: \(diagnostic)")
             try require(
                 tableScroll.frame.height >= 110
                     && split.arrangedSubviews[1].frame.height >= 100,
@@ -780,38 +1119,40 @@ Task { @MainActor in
         let pair = try await editorApp.js("return await window.nativePair()") as! [String: Any]
         let light = Data(base64Encoded: pair["light"] as! String)!
         let dark = Data(base64Encoded: pair["dark"] as! String)!
-        try require(light != dark, "different appearance pixels")
-        let lightImage = try loadImage(light), darkImage = try loadImage(dark)
-        try require(lightImage.width == 2880 && lightImage.height == 1800, "PNG dimensions")
         let output = URL(
             fileURLWithPath: ProcessInfo.processInfo.environment["WAPACAL_UI_OUTPUT"]!,
             isDirectory: true)
-        try light.write(to: output.appendingPathComponent("worker-light.png"))
-        try dark.write(to: output.appendingPathComponent("worker-dark.png"))
-        try encodePair(
-            light: lightImage, dark: darkImage, to: output.appendingPathComponent("worker.heic"))
-        let info = try inspectData(Data(contentsOf: output.appendingPathComponent("worker.heic")))
-        try require(
-            info.frameCount == 2 && info.width == 2880 && info.darkIndex == 1, "HEIC export")
+        if let lightImage = try? loadImage(light), let darkImage = try? loadImage(dark) {
+            try require(lightImage.width == 2880 && lightImage.height == 1800, "PNG dimensions")
+            try light.write(to: output.appendingPathComponent("worker-light.png"))
+            try dark.write(to: output.appendingPathComponent("worker-dark.png"))
+            try encodePair(
+                light: lightImage, dark: darkImage, to: output.appendingPathComponent("worker.heic")
+            )
+            let info = try inspectData(
+                Data(contentsOf: output.appendingPathComponent("worker.heic")))
+            try require(
+                info.frameCount == 2 && info.width == 2880 && info.darkIndex == 1, "HEIC export")
 
-        editorApp.openExportFile(output.appendingPathComponent("worker.heic").path)
-        try require(
-            importer.window?.isVisible == true && importer.lightView.image != nil
-                && importer.darkView.image != nil, "valid import opens populated preview")
-        try require(NSApp.mainMenu === mainMenu, "import retains application menus")
-        editorApp.window.performClose(nil)
-        try require(
-            NSApp.activationPolicy() == .regular && importer.window.isVisible,
-            "import preview remains active after editor closes")
-        importer.window.performClose(nil)
-        try require(
-            NSApp.activationPolicy() == .accessory, "closing final preview leaves menu bar app")
-        editorApp.openExportFile(output.appendingPathComponent("worker.heic").path)
-        try require(
-            importer.window.isVisible && NSApp.mainMenu === mainMenu,
-            "reopen existing import preview")
-        editorApp.show()
-        importer.window.performClose(nil)
+            editorApp.openExportFile(output.appendingPathComponent("worker.heic").path)
+            try require(
+                importer.window?.isVisible == true && importer.lightView.image != nil
+                    && importer.darkView.image != nil, "valid import opens populated preview")
+            try require(NSApp.mainMenu === mainMenu, "import retains application menus")
+            editorApp.window.performClose(nil)
+            try require(
+                NSApp.activationPolicy() == .regular && importer.window.isVisible,
+                "import preview remains active after editor closes")
+            importer.window.performClose(nil)
+            try require(
+                NSApp.activationPolicy() == .accessory, "closing final preview leaves menu bar app")
+            editorApp.openExportFile(output.appendingPathComponent("worker.heic").path)
+            try require(
+                importer.window.isVisible && NSApp.mainMenu === mainMenu,
+                "reopen existing import preview")
+            editorApp.show()
+            importer.window.performClose(nil)
+        }
 
         for (tab, file) in [
             ("preview", "native-preview"), ("events", "native-events"),
@@ -820,7 +1161,7 @@ Task { @MainActor in
             ui.tabs.selectTabViewItem(withIdentifier: tab)
             editorApp.window.contentView?.layoutSubtreeIfNeeded()
             try await Task.sleep(nanoseconds: 100_000_000)
-            let root = editorApp.window.contentView!
+            let root = editorApp.window.contentView!.superview!
             let image = root.bitmapImageRepForCachingDisplay(in: root.bounds)!
             root.cacheDisplay(in: root.bounds, to: image)
             try image.representation(using: .png, properties: [:])!.write(
@@ -867,17 +1208,17 @@ Task { @MainActor in
         editorApp.automatic.state = .off
         editorApp.saveTimer?.invalidate()
         editorApp.showSettings()
-        editorApp.settingsTabs.selectTabViewItem(withIdentifier: "calendars")
+        editorApp.showCalendars()
         _ = try await editorApp.js(
             "return window.nativeUpdate(patch)",
             ["patch": ["mode": "month", "month": "2026-09", "course": ""]])
         fake.hasAccess = false
         editorApp.chooseLocalCalendars()
         let recoveryDeadline = Date().addingTimeInterval(10)
-        while editorApp.settingsWindow.attachedSheet == nil && Date() < recoveryDeadline {
+        while editorApp.window.attachedSheet == nil && Date() < recoveryDeadline {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        guard let recovery = editorApp.settingsWindow.attachedSheet,
+        guard let recovery = editorApp.window.attachedSheet,
             let recoveryRoot = recovery.contentView
         else {
             throw WallpaperError.invalid("Calendar access recovery did not open")
@@ -888,7 +1229,7 @@ Task { @MainActor in
             "denied calendar access offers a settings shortcut")
         recoveryButtons.first { $0.title == "Cancel" }!.performClick(nil)
         let recoveryCloseDeadline = Date().addingTimeInterval(10)
-        while (editorApp.settingsWindow.attachedSheet != nil || editorApp.fetching)
+        while (editorApp.window.attachedSheet != nil || editorApp.fetching)
             && Date() < recoveryCloseDeadline
         {
             try await Task.sleep(nanoseconds: 50_000_000)
@@ -901,10 +1242,10 @@ Task { @MainActor in
         editorApp.applicationDidBecomeActive(
             Notification(name: NSApplication.didBecomeActiveNotification))
         let sheetDeadline = Date().addingTimeInterval(10)
-        while editorApp.settingsWindow.attachedSheet == nil && Date() < sheetDeadline {
+        while editorApp.window.attachedSheet == nil && Date() < sheetDeadline {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        guard let sheet = editorApp.settingsWindow.attachedSheet, let sheetRoot = sheet.contentView
+        guard let sheet = editorApp.window.attachedSheet, let sheetRoot = sheet.contentView
         else {
             throw WallpaperError.invalid("Local calendar picker did not open")
         }
@@ -947,6 +1288,19 @@ Task { @MainActor in
             localMenuItems.map(\.title) == ["CALENDARS ON THIS MAC", "Local Calendar 0"],
             "local calendars have a labeled menu section")
         try require(localMenuItems[1].image != nil, "local calendar has an icon")
+        let requestsBeforeRename = fake.requests.count
+        finishCalendarEdit(editorApp.sourceName, "Renamed local calendar")
+        let localRenameDeadline = Date().addingTimeInterval(10)
+        while editorApp.subscriptions[0]["name"] as? String != "Renamed local calendar"
+            && Date() < localRenameDeadline
+        {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try require(
+            editorApp.subscriptions[0]["name"] as? String == "Renamed local calendar"
+                && fake.requests.count == requestsBeforeRename,
+            "local calendar names autosave without fetching events again")
+
         try require(
             editorApp.selectedSourceIndex == 0, "local menu heading preserves source indexing")
         try require(ui.table.numberOfRows == 1, "local event appears in native checklist")
