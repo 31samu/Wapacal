@@ -256,7 +256,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         windowItem.submenu = windowMenu
         menu.addItem(windowItem)
         NSApp.mainMenu = menu
-        item = NSStatusBar.system.statusItem(withLength: 20)
+        item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
             button.image = statusItemIcon()
             button.imagePosition = .imageOnly
