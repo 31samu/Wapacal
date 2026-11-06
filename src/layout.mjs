@@ -276,8 +276,7 @@ export function buildGrid(events, options) {
   };
 }
 
-// Conservative character widths keep the same wrapping in SVG export and the
-// browser preview without requiring a remote font or a running browser.
+// Conservative character widths make wrapping independent of installed fonts.
 export function textWidth(text, size) {
   return (
     [...text].reduce(

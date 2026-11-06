@@ -1,5 +1,5 @@
 // Internal worker API. No interface, DOM event handlers, storage, or network access.
-// AppKit owns presentation and persistence. These names also support legacy callers.
+// AppKit owns presentation and persistence.
 const nativeDefaults = (() => {
   const today = localParts(new Date(), config.timeZone).date;
   return {
@@ -79,24 +79,15 @@ window.nativeLoad = function (payload) {
   next.excludedEventIds = Array.isArray(next.excludedEventIds)
     ? next.excludedEventIds.filter((id) => typeof id === 'string')
     : [];
-  const parsed = payload.subscriptions
-    ? parseCalendars(payload.subscriptions, next.timeZone, next)
-    : payload.ics
-      ? parseCalendar(payload.ics, next.timeZone, 'auto', next)
-      : { name: 'Calendar', events: [] };
-  const fetchedAt =
-    payload.fetchedAt ||
-    payload.subscriptions
-      ?.map((s) => s.fetchedAt)
-      .filter(Boolean)
-      .sort()[0];
+  const subscriptions = payload.subscriptions || [];
+  const parsed = parseCalendars(subscriptions, next.timeZone, next);
+  const fetchedAt = subscriptions
+    .map((s) => s.fetchedAt)
+    .filter(Boolean)
+    .sort()[0];
   if (fetchedAt) next.snapshotDate = localParts(fetchedAt, next.timeZone).date;
   commit(parsed, next);
-  calendarSources = payload.subscriptions
-    ? payload.subscriptions
-    : payload.ics
-      ? [{ id: 'legacy', legacyIds: true, ics: payload.ics, fetchedAt: payload.fetchedAt }]
-      : [];
+  calendarSources = subscriptions;
   if (Object.hasOwn(payload, 'courseCode')) courseCode = payload.courseCode || '';
   return true;
 };
@@ -198,13 +189,6 @@ window.nativeReset = function () {
   calendarSources = [];
   courseCode = '';
   return true;
-};
-window.nativeFeed = (ics, fetchedAt) => {
-  const previous = calendarSources.find((source) => source.id === 'legacy') || {};
-  return window.nativeCalendars(
-    [{ ...previous, id: 'legacy', legacyIds: true, ics, fetchedAt }],
-    fetchedAt,
-  );
 };
 window.nativeCalendars = function (subscriptions, fetchedAt) {
   const reconciled = reconcileSubscriptions(

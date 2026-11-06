@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { JSDOM, VirtualConsole } from 'jsdom';
+import { JSDOM } from 'jsdom';
 import sharp from 'sharp';
 import { renderWallpaper, selectEvents, palettes, colorThemes } from '../src/layout.mjs';
 import { loadFixtureApp } from './helpers/fixture-app.mjs';
@@ -73,54 +73,6 @@ test('sanitized fixture fits the initial module in both appearances', async () =
   assert.equal(metadata.height, 1964);
 });
 
-test('preview switches theme, edits module dates, changes month, reveals details and blocks invalid exports', async () => {
-  const { preview: html } = await loadFixtureApp();
-  const errors = [];
-  const vc = new VirtualConsole();
-  vc.on('jsdomError', (error) => errors.push(error));
-  const dom = new JSDOM(html, { runScripts: 'dangerously', virtualConsole: vc });
-  const { document, Event } = dom.window;
-  const el = (id) => document.getElementById(id);
-  const change = (id, value, type = 'input') => {
-    el(id).value = value;
-    el(id).dispatchEvent(new Event(type, { bubbles: true }));
-  };
-  assert.equal(errors.length, 0);
-  assert.equal(document.querySelectorAll('.event').length, 5);
-  assert.equal(
-    document.querySelector('aside').lastElementChild.classList.contains('export-actions'),
-    true,
-  );
-  assert.equal(el('weekends').checked, false);
-  assert.equal(el('theme').value, 'system');
-  assert.match(el('wallpaper').innerHTML, /Prototyping/);
-  change('theme', 'dark');
-  assert.match(el('wallpaper').innerHTML, /#18231f/);
-  change('module-name', 'My module');
-  assert.match(el('wallpaper').innerHTML, /My module/);
-  el('show-title').checked = false;
-  el('show-title').dispatchEvent(new Event('change', { bubbles: true }));
-  assert.doesNotMatch(el('wallpaper').innerHTML, />My module<\/text>/);
-  change('start', '2026-10-12');
-  assert.equal(document.querySelectorAll('.event').length, 3);
-  change('mode', 'month');
-  change('month', '2026-09');
-  assert.equal(document.querySelectorAll('.event').length, 7);
-  assert.match(el('wallpaper').innerHTML, /September 2026/);
-  assert.doesNotMatch(el('wallpaper').innerHTML, /SATURDAY|SUNDAY/);
-  el('weekends').checked = true;
-  el('weekends').dispatchEvent(new Event('change', { bubbles: true }));
-  assert.match(el('wallpaper').innerHTML, /SATURDAY.*SUNDAY/s);
-  assert.match(el('event-list').textContent, /R100/);
-  assert.ok(document.querySelector('.conflict'));
-  assert.equal(document.querySelectorAll('.event').length, 7);
-  change('mode', 'module');
-  change('end', '2026-01-01');
-  assert.ok(el('export-png').disabled);
-  assert.match(el('error').textContent, /valid/);
-  dom.window.close();
-});
-
 test('September all-events export fits every fixture event without overlaps in both appearances', async () => {
   const { data } = await loadFixtureApp();
   for (const theme of ['light', 'dark']) {
@@ -151,105 +103,6 @@ test('September all-events export fits every fixture event without overlaps in b
         assert.ok(day[i].top > day[i - 1].bottom, `Events overlap on ${date}`);
     }
   }
-});
-
-test('event exclusions remain reversible, persist on reload and affect exports', async () => {
-  const { preview: html } = await loadFixtureApp();
-  const create = (saved) =>
-    new JSDOM(html, {
-      url: 'https://wapacal.example/preview',
-      runScripts: 'dangerously',
-      beforeParse(window) {
-        if (saved) for (const [key, value] of saved) window.localStorage.setItem(key, value);
-      },
-    });
-  const dom = create();
-  const { document, Event } = dom.window;
-  const findFinal = () =>
-    [...document.querySelectorAll('#event-list input')].find((input) =>
-      input.getAttribute('aria-label').includes('Launch presentation'),
-    );
-  const input = findFinal();
-  const uid = input.dataset.eventId;
-  input.checked = false;
-  input.dispatchEvent(new Event('change'));
-  assert.equal(findFinal().checked, false);
-  assert.equal(document.querySelectorAll('.event').length, 5);
-  assert.match(document.getElementById('detail-count').textContent, /4 included · 1 excluded/);
-  assert.doesNotMatch(document.getElementById('wallpaper').innerHTML, /Launch presentation/);
-  document.getElementById('theme').value = 'dark';
-  document.getElementById('theme').dispatchEvent(new Event('input'));
-  assert.equal(findFinal().checked, false);
-  assert.equal(document.getElementById('export-svg'), null);
-  assert.equal(document.getElementById('export-heic').textContent, 'Export HEIC');
-  const saved = Object.entries(dom.window.localStorage);
-  const reload = create(saved);
-  const check = [...reload.window.document.querySelectorAll('#event-list input')].find(
-    (input) => input.dataset.eventId === uid,
-  );
-  assert.equal(check.checked, false);
-  check.checked = true;
-  check.dispatchEvent(new reload.window.Event('change'));
-  assert.match(reload.window.document.getElementById('wallpaper').innerHTML, /Launch presentation/);
-  assert.match(
-    reload.window.document.getElementById('detail-count').textContent,
-    /5 included · 0 excluded/,
-  );
-  dom.window.close();
-  reload.window.close();
-});
-
-test('Mac export freezes both appearances and event exclusions while rendering', async () => {
-  const { preview: html } = await loadFixtureApp();
-  const dom = new JSDOM(html, { runScripts: 'dangerously' });
-  const { document, Event } = dom.window;
-  const input = [...document.querySelectorAll('#event-list input')].find((input) =>
-    input.getAttribute('aria-label').includes('Launch presentation'),
-  );
-  input.checked = false;
-  input.dispatchEvent(new Event('change'));
-  const frames = [];
-  let finish;
-  const downloaded = new Promise((resolve) => (finish = resolve));
-  dom.window.pngBlob = async (svg) => {
-    frames.push(svg);
-    return new dom.window.Blob(['test PNG bytes']);
-  };
-  dom.window.download = (blob, extension) => finish({ blob, extension });
-  document.getElementById('export-heic').click();
-  input.checked = true;
-  input.dispatchEvent(new Event('change'));
-  const { blob, extension } = await downloaded;
-  const payload = JSON.parse(
-    await new Promise((resolve) => {
-      const reader = new dom.window.FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.readAsText(blob);
-    }),
-  );
-  assert.equal(extension, 'wapacal');
-  assert.equal(payload.version, 1);
-  assert.equal(Buffer.from(payload.light, 'base64').toString(), 'test PNG bytes');
-  assert.equal(payload.light, payload.dark);
-  assert.equal(frames.length, 2);
-  assert.match(frames[0], /#f0efe9/);
-  assert.match(frames[1], /#18231f/);
-  for (const svg of frames) assert.doesNotMatch(svg, /Launch presentation/);
-  dom.window.close();
-});
-
-test('browser preview expands subscriptions when navigating to a distant month', async () => {
-  const { preview } = await loadFixtureApp();
-  const dom = new JSDOM(preview, { runScripts: 'dangerously', url: 'https://preview.invalid' });
-  const ics =
-    'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:weekly\r\nDTSTART:20260908T080000Z\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Repeating\r\nEND:VEVENT\r\nEND:VCALENDAR';
-  dom.window.eval(
-    `data.subscriptions = ${JSON.stringify([{ id: 'test', ics }])}; state.mode = 'month'; state.month = '2035-09'; state.course = ''; render();`,
-  );
-  assert.equal(dom.window.document.getElementById('error').textContent, '');
-  assert.match(dom.window.document.getElementById('wallpaper').innerHTML, /Repeating/);
-  assert.ok(dom.window.eval("data.events.some(event => event.date.startsWith('2035-09'))"));
-  dom.window.close();
 });
 
 test('boxes lighten or darken calendar colors and use the requested theme text colors', async () => {
@@ -296,47 +149,6 @@ test('boxes lighten or darken calendar colors and use the requested theme text c
     }
   }
 });
-
-test('preview color controls select presets and retain custom colors', async () => {
-  const { preview } = await loadFixtureApp();
-  const dom = new JSDOM(preview, { runScripts: 'dangerously' });
-  const el = (id) => dom.window.document.getElementById(id);
-  const change = (id, value) => {
-    el(id).value = value;
-    el(id).dispatchEvent(new dom.window.Event('input'));
-  };
-  change('color-theme', 'ocean');
-  assert.match(el('wallpaper').innerHTML, /#edf3f8/);
-  change('color-theme', 'custom');
-  assert.equal(el('custom-colors').hidden, false);
-  assert.equal(el('color-light-bg').value, colorThemes.neutral.light.bg);
-  change('color-light-bg', '#abcdef');
-  assert.match(el('wallpaper').innerHTML, /#abcdef/);
-  change('color-theme', 'neutral');
-  assert.equal(el('calendar-colors-field').hidden, false);
-  assert.equal(el('custom-colors').hidden, true);
-  change('color-theme', 'custom');
-  assert.equal(el('color-light-bg').value, '#abcdef');
-  change('theme', 'dark');
-  change('color-dark-bg', '#121212');
-  assert.match(el('wallpaper').innerHTML, /#121212/);
-  dom.window.close();
-});
-
-function textContrast(a, b) {
-  const luminance = (color) => {
-    const channels = color
-      .slice(1)
-      .match(/../g)
-      .map((hex) => {
-        const value = parseInt(hex, 16) / 255;
-        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
-      });
-    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
-  };
-  const values = [luminance(a), luminance(b)];
-  return (Math.max(...values) + 0.05) / (Math.min(...values) + 0.05);
-}
 
 test('custom grid stays readable while event boxes preserve the selected text color', async () => {
   const { data, config } = await loadFixtureApp();
@@ -462,3 +274,17 @@ test('event titles keep their top inset when times and locations are hidden', as
     dom.window.close();
   }
 });
+function textContrast(a, b) {
+  const luminance = (color) => {
+    const channels = color
+      .slice(1)
+      .match(/../g)
+      .map((hex) => {
+        const value = parseInt(hex, 16) / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      });
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  };
+  const values = [luminance(a), luminance(b)];
+  return (Math.max(...values) + 0.05) / (Math.min(...values) + 0.05);
+}

@@ -66,6 +66,19 @@ Task { @MainActor in
             try await Task.sleep(nanoseconds: 50_000_000)
         }
         try require(editorApp.ready, "startup: \(editorApp.status.stringValue)")
+        try require(editorApp.window.isVisible, "manual launch opens the editor")
+        try require(!launchedAtLogin(nil), "missing launch event is a manual launch")
+        let launchEvent = NSAppleEventDescriptor(
+            eventClass: kCoreEventClass, eventID: kAEOpenApplication,
+            targetDescriptor: nil, returnID: AEReturnID(kAutoGenerateReturnID),
+            transactionID: AETransactionID(kAnyTransactionID))
+        try require(!launchedAtLogin(launchEvent), "ordinary open event is a manual launch")
+        launchEvent.setParam(
+            NSAppleEventDescriptor(enumCode: keyAELaunchedAsLogInItem), forKeyword: keyAEPropData)
+        try require(launchedAtLogin(launchEvent), "login launch is detected")
+        launchEvent.setParam(
+            NSAppleEventDescriptor(enumCode: keyAELaunchedAsServiceItem), forKeyword: keyAEPropData)
+        try require(!launchedAtLogin(launchEvent), "service launch is distinct from login")
         editorApp.timer?.invalidate()
         for (shared, expected) in [("$null" as Any, false), (["Desktop": [:]] as Any, true)] {
             let data = try PropertyListSerialization.data(
@@ -1111,7 +1124,7 @@ Task { @MainActor in
         rejected = false
         do {
             _ = try await editorApp.js(
-                "return window.nativeFeed(ics,date)",
+                "return window.nativeCalendars([{id: 'invalid', ics}],date)",
                 ["ics": "invalid ICS", "date": "2026-09-08T12:00:00Z"])
         } catch { rejected = true }
         try require(rejected && ui.events.count > 0, "invalid feed retention")

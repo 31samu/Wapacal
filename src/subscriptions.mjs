@@ -37,13 +37,8 @@ export async function readCalendarResponse(response, limit = 10_000_000) {
   }
 }
 
-export function configuredSubscriptions(config, env = process.env) {
-  const sources = env.CALENDAR_URL
-    ? [{ id: 'legacy', url: env.CALENDAR_URL, name: 'Calendar', legacyIds: true }]
-    : (config.subscriptions ??
-      (config.subscriptionUrl
-        ? [{ id: 'legacy', url: config.subscriptionUrl, name: 'TimeEdit', legacyIds: true }]
-        : []));
+export function configuredSubscriptions(config) {
+  const sources = config.subscriptions ?? [];
   const ids = new Set(),
     urls = new Set();
   return sources.map((source) => {
@@ -74,21 +69,10 @@ export async function loadSnapshots(config) {
       return 'null';
     }),
   );
-  if (cache)
-    return sources.map((source) => ({
-      ...source,
-      ...cache.subscriptions.find((saved) => saved.id === source.id && saved.url === source.url),
-      ...source,
-    }));
-  const ics = await readFile('data/calendar.ics', 'utf8').catch((error) => {
-    if (error.code !== 'ENOENT') throw error;
-    return null;
-  });
-  if (ics === null) return sources;
-  const metadata = JSON.parse(await readFile('data/source.json', 'utf8').catch(() => '{}'));
-  if (!sources.length) return [{ id: 'legacy', legacyIds: true, ics, ...metadata }];
+  if (!cache) return sources;
   return sources.map((source) => ({
     ...source,
-    ...(source.legacyIds ? { ics, ...metadata } : {}),
+    ...cache.subscriptions.find((saved) => saved.id === source.id && saved.url === source.url),
+    ...source,
   }));
 }

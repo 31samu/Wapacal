@@ -1,7 +1,7 @@
-import test from 'node:test';
+import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFile, writeFile, mkdtemp, mkdir, readdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdtemp, mkdir, readdir, copyFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import sharp from 'sharp';
@@ -10,6 +10,26 @@ import { loadFixtureApp } from './helpers/fixture-app.mjs';
 import { compileNative } from '../scripts/native-compile.mjs';
 const binary = resolve('output/Wapacal.app/Contents/MacOS/Wapacal');
 const bundle = resolve('output/Wapacal.app');
+
+const temporaryDirectories = [];
+async function temporaryDirectory(prefix) {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+let checksExecutable;
+before(async () => {
+  const directory = await temporaryDirectory('wapacal-native-checks-');
+  const entryPoint = join(directory, 'main.swift');
+  await copyFile('test/native-checks.swift', entryPoint);
+  checksExecutable = join(directory, 'checks');
+  compileNative(entryPoint, checksExecutable, { stdio: 'pipe' });
+});
+after(async () => {
+  await Promise.all(
+    temporaryDirectories.map((directory) => rm(directory, { recursive: true, force: true })),
+  );
+});
 
 test('native bundle ships only a headless worker, with no browser interface', async () => {
   const resources = await readdir(join(bundle, 'Contents', 'Resources'));
@@ -86,7 +106,7 @@ test('native bundle contains a rounded app icon at every macOS scale', async () 
 });
 
 test('native export imports, validates both frames, and rejects invalid inputs without overwriting', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'wapacal-heic-'));
+  const dir = await temporaryDirectory('wapacal-heic-');
   const { data, config } = await loadFixtureApp();
   const images = {};
   for (const theme of ['light', 'dark']) {
@@ -142,56 +162,18 @@ test('native export imports, validates both frames, and rejects invalid inputs w
 });
 
 test('missing wallpaper sources can be recorded without blocking Apply and old backups still decode', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'wapacal-backup-'));
-  const file = join(dir, 'main.swift');
-  await writeFile(
-    file,
-    `import AppKit
-
-let missing = URL(fileURLWithPath: "/nonexistent/wapacal-test-wallpaper.png")
-for url in [nil, missing, URL(string: "https://example.com/image.png")] as [URL?] {
- let record = WallpaperBackup(screenID: "test", url: url, options: [.imageScaling: 3, .allowClipping: true])
- let decoded = try JSONDecoder().decode(WallpaperBackup.self, from: JSONEncoder().encode(record))
- assert(!decoded.canRestore)
- assert(decoded.url == url)
- assert(decoded.scaling == 3 && decoded.clipping == true)
-}
-let old = #"{"screen":"test","url":"file:///System/Library/CoreServices/SystemVersion.plist","scaling":3,"clipping":true}"#.data(using: .utf8)!
-let decoded = try JSONDecoder().decode(WallpaperBackup.self, from: old)
-assert(decoded.canRestore)
-print("Backup regression checks passed")
-`,
-  );
-  const executable = join(dir, 'checks');
-  compileNative(file, executable, { stdio: 'pipe' });
-  assert.match(execFileSync(executable, [], { encoding: 'utf8' }), /checks passed/);
+  assert.match(execFileSync(checksExecutable, ['backup'], { encoding: 'utf8' }), /checks passed/);
 });
 
 test('refresh frequency accepts only the choices shown in the app', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'wapacal-cache-'));
-  const file = join(dir, 'main.swift');
-  await writeFile(
-    file,
-    `import Foundation
-
-assert(savedRefreshInterval(nil) == 3600)
-assert(savedRefreshInterval(900) == 900)
-assert(savedRefreshInterval(1800) == 1800)
-assert(savedRefreshInterval(86400) == 86400)
-assert(savedRefreshInterval(0) == 3600)
-assert(savedRefreshInterval(-1) == 3600)
-assert(savedRefreshInterval(.nan) == 3600)
-assert(savedRefreshInterval(.infinity) == 3600)
-print("Cache policy checks passed")
-`,
+  assert.match(
+    execFileSync(checksExecutable, ['refresh-interval'], { encoding: 'utf8' }),
+    /checks passed/,
   );
-  const executable = join(dir, 'checks');
-  compileNative(file, executable, { stdio: 'pipe' });
-  assert.match(execFileSync(executable, [], { encoding: 'utf8' }), /checks passed/);
 });
 
 test('legacy and previous-bundle data migrate while reset preserves active recovery records', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'wapacal-storage-'));
+  const dir = await temporaryDirectory('wapacal-storage-');
   const legacy = join(dir, 'legacy'),
     support = join(dir, 'support');
   await Promise.all([
@@ -207,31 +189,7 @@ test('legacy and previous-bundle data migrate while reset preserves active recov
     writeFile(join(legacy, 'wallpapers', 'applied', 'old.heic'), 'wallpaper'),
     writeFile(join(legacy, 'restore-flat.json'), '{}'),
   ]);
-  const file = join(dir, 'main.swift');
-  await writeFile(
-    file,
-    `import AppKit
-
-try migrateLegacyWorkspace()
-let files = FileManager.default
-assert(files.fileExists(atPath: stateDirectory().appendingPathComponent("app-state.json").path))
-assert(files.fileExists(atPath: recoveryDirectory().appendingPathComponent("restore-display.json").path))
-assert(files.fileExists(atPath: recoveryDirectory().appendingPathComponent("restore-flat.json").path))
-assert(files.fileExists(atPath: recoveryDirectory().appendingPathComponent("restored-old.json").path))
-assert(files.fileExists(atPath: appliedDirectory().appendingPathComponent("old.heic").path))
-let legacy = URL(fileURLWithPath: ProcessInfo.processInfo.environment["WAPACAL_LEGACY_WORKSPACE"]!)
-assert(!files.fileExists(atPath: legacy.appendingPathComponent("state/app-state.json").path))
-try resetInactiveRuntimeData()
-assert(!files.fileExists(atPath: stateDirectory().appendingPathComponent("app-state.json").path))
-assert(files.fileExists(atPath: recoveryDirectory().appendingPathComponent("restore-display.json").path))
-assert(!files.fileExists(atPath: recoveryDirectory().appendingPathComponent("restored-old.json").path))
-assert(!files.fileExists(atPath: appliedDirectory().appendingPathComponent("old.heic").path))
-print("Storage migration checks passed")
-`,
-  );
-  const executable = join(dir, 'checks');
-  compileNative(file, executable, { stdio: 'pipe' });
-  const output = execFileSync(executable, [], {
+  const output = execFileSync(checksExecutable, ['migration'], {
     encoding: 'utf8',
     env: { ...process.env, WAPACAL_APP_SUPPORT: support, WAPACAL_LEGACY_WORKSPACE: legacy },
   });
@@ -239,61 +197,18 @@ print("Storage migration checks passed")
 });
 
 test('production migration does not inspect the folder containing the app', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'wapacal-storage-scope-'));
-  const file = join(dir, 'main.swift');
-  await writeFile(
-    file,
-    `import AppKit
-
-assert(legacyWorkspaceDirectories().isEmpty)
-print("Storage migration scope checks passed")
-`,
-  );
-  const executable = join(dir, 'checks');
-  compileNative(file, executable, { stdio: 'pipe' });
   const environment = { ...process.env };
   delete environment.WAPACAL_LEGACY_WORKSPACE;
   assert.match(
-    execFileSync(executable, [], { encoding: 'utf8', env: environment }),
+    execFileSync(checksExecutable, ['migration-scope'], { encoding: 'utf8', env: environment }),
     /checks passed/,
   );
 });
 
 test('wallpaper storage keeps image URLs immutable and protects restoration during cleanup', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'wapacal-image-storage-'));
-  const file = join(dir, 'main.swift');
-  await writeFile(
-    file,
-    `import AppKit
-
-try ensureWorkspaceDirectories()
-let firstData = Data("first image".utf8)
-let first = try storeAppliedWallpaper(firstData)
-let second = try storeAppliedWallpaper(Data("second image".utf8))
-let third = try storeAppliedWallpaper(Data("third image".utf8))
-assert(Set([first, second, third]).count == 3)
-let oldDate = Date(timeIntervalSince1970: 1)
-try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: first.path)
-let repeated = try storeAppliedWallpaper(firstData)
-assert(repeated == first)
-let retained = try Data(contentsOf: first)
-assert(retained == firstData)
-let modified = try first.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-assert(modified == oldDate, "identical images must not rewrite a cached URL")
-let backup = WallpaperBackup(screenID: "fixture", url: first, options: [:])
-try JSONEncoder().encode(backup).write(to: recoveryDirectory().appendingPathComponent("restore-fixture.json"))
-for index in 0..<15 { _ = try storeAppliedWallpaper(Data("image \\(index)".utf8)) }
-try cleanupRuntimeFiles()
-assert(FileManager.default.fileExists(atPath: first.path), "cleanup must preserve the restore image")
-let files = try FileManager.default.contentsOfDirectory(at: appliedDirectory(), includingPropertiesForKeys: nil)
-assert(files.count == 11, "keep ten inactive images plus the protected restore image")
-print("Wallpaper storage checks passed")
-`,
-  );
-  const executable = join(dir, 'checks');
-  compileNative(file, executable, { stdio: 'pipe' });
+  const dir = await temporaryDirectory('wapacal-image-storage-');
   assert.match(
-    execFileSync(executable, [], {
+    execFileSync(checksExecutable, ['wallpaper-storage'], {
       encoding: 'utf8',
       env: { ...process.env, WAPACAL_APP_SUPPORT: join(dir, 'support') },
     }),

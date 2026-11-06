@@ -94,7 +94,7 @@ npm run test:all
 
 Build the app before running all tests. Native UI and HEIC tests need a logged-in macOS graphical session. Tests use fictional calendar fixtures.
 
-See the [development guide](docs/development.md) for private builds, the Firefox preview, and command-line tools, or the [architecture guide](docs/native-interface.md) for how the app works.
+See the [development guide](docs/development.md) for private builds and command-line tools, or the [architecture guide](docs/native-interface.md) for how the app works.
 
 ## License
 

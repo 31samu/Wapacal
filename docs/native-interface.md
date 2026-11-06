@@ -2,7 +2,7 @@
 
 Wapacal's application interface is AppKit. Its window contains native controls, a raster image preview, an event table with selectable plain-text details, and editable module suggestions. Save and open dialogs, errors, menus, the menu bar item, and the wallpaper import window are also native.
 
-`CalendarEngine` privately owns a detached `WKWebView`. It never exposes that view or adds it to a window, responder chain, or accessibility hierarchy. The worker loads only `calendar-worker.html`, which contains bundled parsing and rendering code and no interface. The app bundle does not contain `preview.html` or the old `editor.html`.
+`CalendarEngine` privately owns a detached `WKWebView`. It never exposes that view or adds it to a window, responder chain, or accessibility hierarchy. The worker loads only `calendar-worker.html`, which contains bundled parsing and rendering code and no interface.
 
 The main window keeps schedule editing beside Preview, Choose events, and Suggested modules. Appearance options expand in the sidebar; the top row provides the display selector, Refresh, Settings, Export, and Apply. Snapshot details remain available in the event-count label's tooltip.
 
@@ -21,7 +21,7 @@ The menu bar item offers Open Wapacal, Settings, Refresh calendars, and Quit. Fi
 | `native/LocalCalendarSettings.swift` | Local calendar picker, permission recovery, coalesced change notifications |
 | `native/CalendarEngine.swift` | Serialized calls to the private worker, load and operation timeouts, navigation restriction, worker failure reporting |
 | `src/native-editor.js` | Calendar and editor transactions, serializable snapshots, day rollover, suggestions, PNG and paired image rendering |
-| `src/calendar.mjs`, `src/layout.mjs`, `src/suggestions.mjs` | Shared parser, wallpaper layout and module heuristics, also used by development tools |
+| `src/calendar.mjs`, `src/layout.mjs`, `src/suggestions.mjs` | Calendar parser, wallpaper layout and module heuristics |
 | `native/Wallpaper.swift` | ImageIO HEIC encoding and validation, desktop application/restoration, recovery records, legacy imports and CLI |
 
 ## Data flow
@@ -55,17 +55,15 @@ The bundle identifier is `com.samuelkremer.wapacal`. The app stores runtime data
 
 Both `.wapacal` and legacy `.timetable` imports, paired HEIC files, the existing CLI commands, and appearance mapping remain supported. The minimum deployment target is macOS 13; actual GUI execution is tested on the development Mac, not on every supported macOS release.
 
-The browser preview remains a separate development and compatibility tool. It is neither bundled nor opened by the app. Its browser-local preferences remain separate from the app's existing saved state.
-
 ## Applied wallpaper files
 
 Applied HEIC filenames include a hash of their contents. Different images never overwrite a previously used wallpaper URL, so macOS cannot reuse an older render for new content. Identical files share a URL. Cleanup keeps ten inactive images plus images selected on connected displays or referenced by restoration records. Older per-display files are retained. This favors reliable updates over limiting entries in System Settings' “Your Photos” list; deleting local files does not promise to remove those entries.
 
 ## Verification
 
-`scripts/native-compile.mjs` compiles the production Swift files together with an explicit `main.swift` entry point. The app and native tests use this same compiler helper; neither extracts or replaces Swift source text.
+`scripts/native-compile.mjs` compiles the production Swift files together with an explicit `main.swift` entry point. The app and native tests use this same compiler helper; neither extracts or replaces production Swift source text. Storage and policy checks compile once from `test/native-checks.swift` and run as separate isolated processes.
 
-`npm run build:native` compiles and signs the app with empty subscriptions and a current-month view, without reading local configuration or calendar snapshots. `npm run build:native:private` explicitly embeds local configuration and snapshots for development. Neither command requires a generated browser preview. `npm run test:all` runs parser, layout, subscriptions, browser compatibility, worker, HEIC/storage, and native UI integration tests.
+`npm run build:native` compiles and signs the app with empty subscriptions and a current-month view, without reading local configuration or calendar snapshots. `npm run build:native:private` explicitly embeds local configuration and snapshots for development. `npm run test:all` runs parser, layout, subscriptions, worker, HEIC/storage, and native UI integration tests.
 
 `test/native-ui.mjs` compiles a temporary application from the production Swift sources and uses the bundled production worker with fictional cached feeds and an isolated Application Support directory. It exercises native target/action controls, validates image dimensions and paired HEIC data, rejects invalid edits and feeds, checks persistence, accepts suggestions, tests reset and close/reopen, and asserts that each tab contains no WebKit view. A fake native calendar provider exercises the picker, calendar toggles, event exclusions, range changes, deletion, transient errors, and revoked access without reading personal calendars. It also checks normal/minimum window geometry, Settings control ownership and persistence, shared status messages, appearance disclosure, export choices, and closing/reopening both windows. The tests never apply wallpaper or register login items.
 

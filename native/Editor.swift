@@ -2,6 +2,12 @@ import AppKit
 import CryptoKit
 import ServiceManagement
 
+func launchedAtLogin(_ event: NSAppleEventDescriptor?) -> Bool {
+    event?.eventID == kAEOpenApplication
+        && event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue
+            == keyAELaunchedAsLogInItem
+}
+
 func savedRefreshInterval(_ value: Double?) -> TimeInterval {
     let choices: Set<Double> = [900, 1800, 3600, 10800, 21600, 43200, 86400]
     return value.flatMap { choices.contains($0) ? $0 : nil } ?? 3600
@@ -136,6 +142,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     var refreshInterval: TimeInterval { savedRefreshInterval(saved["refreshInterval"] as? Double) }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let startsInMenuBar = launchedAtLogin(NSAppleEventManager.shared().currentAppleEvent)
         do { try migrateLegacyWorkspace() } catch {
             status.stringValue =
                 "Could not migrate older app data. The original files were kept. \(error.localizedDescription)"
@@ -181,7 +188,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 do { _ = try await self.js("return true;") } catch { self.reportEditorError(error) }
             }
         }
-        NSApp.setActivationPolicy(.regular)
+        NSApp.setActivationPolicy(startsInMenuBar ? .accessory : .regular)
         let menu = NSMenu()
         let appItem = NSMenuItem()
         menu.addItem(appItem)
@@ -460,7 +467,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
-        show()
+        if !startsInMenuBar { show() }
         for file in pendingFiles { openExportFile(file) }
         pendingFiles.removeAll()
     }

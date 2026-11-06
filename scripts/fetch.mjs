@@ -10,8 +10,7 @@ const config = JSON.parse(
   await readFile('config.local.json', 'utf8').catch(() => readFile('config.example.json', 'utf8')),
 );
 const configured = configuredSubscriptions(config);
-if (!configured.length)
-  throw new Error('Add subscriptions to config.local.json or set CALENDAR_URL.');
+if (!configured.length) throw new Error('Add subscriptions to config.local.json.');
 const sources = await loadSnapshots(config).catch((error) => {
   if (error.code === 'ENOENT') return configured;
   throw error;
@@ -49,6 +48,6 @@ for (let index = 0; index < sources.length; index++) {
 await writeFile('data/calendars.json.tmp', JSON.stringify({ subscriptions: sources }, null, 2));
 await rename('data/calendars.json.tmp', 'data/calendars.json');
 console.log(
-  `Saved ${parseCalendars(sources, config.timeZone).events.length} events from ${sources.length} subscriptions. Run npm run build to render.`,
+  `Saved ${parseCalendars(sources, config.timeZone).events.length} events from ${sources.length} subscriptions. Run npm run build:native:private to embed them in the app.`,
 );
 if (failed) process.exitCode = 1;
