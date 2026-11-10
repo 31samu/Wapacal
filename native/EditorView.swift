@@ -214,7 +214,7 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
 {
     var onChange: (([String: Any]) -> Void)?
     var onInclude: ((String, Bool) -> Void)?
-    var onExport: ((Bool, String?) -> Void)?
+    var onExport: ((ExportFormat, String?) -> Void)?
     var canExport: (() -> Bool)?
     private(set) var editor: [String: Any] = [:]
     private(set) var events: [[String: Any]] = []
@@ -417,12 +417,13 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
             ("PNG · Light…", #selector(exportLightPNG), ""),
             ("PNG · Dark…", #selector(exportDarkPNG), ""),
             ("HEIC · Light and dark…", #selector(exportHEIC), "e"),
+            ("PDF · A4…", #selector(exportPDF), ""),
         ] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
             item.target = self
             exportMenu.menu?.addItem(item)
         }
-        exportMenu.setAccessibilityLabel("Export wallpaper")
+        exportMenu.setAccessibilityLabel("Export calendar")
         previewResolution.isHidden = true
         previewResolution.setAccessibilityLabel("Preview image size")
         let lightHeading = NSTextField(labelWithString: "Light")
@@ -1037,22 +1038,26 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
     }
     @objc func exportPNG() {
         view.window?.makeFirstResponder(nil)
-        onExport?(false, nil)
+        onExport?(.png, nil)
     }
     @objc func exportLightPNG() {
         view.window?.makeFirstResponder(nil)
-        onExport?(false, "light")
+        onExport?(.png, "light")
     }
     @objc func exportDarkPNG() {
         view.window?.makeFirstResponder(nil)
-        onExport?(false, "dark")
+        onExport?(.png, "dark")
     }
     @objc func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         canExport?() ?? false
     }
     @objc func exportHEIC() {
         view.window?.makeFirstResponder(nil)
-        onExport?(true, nil)
+        onExport?(.heic, nil)
+    }
+    @objc func exportPDF() {
+        view.window?.makeFirstResponder(nil)
+        onExport?(.pdf, nil)
     }
     @objc func changeContent() {
         tabs.selectTabViewItem(at: contentSelector.selectedSegment)

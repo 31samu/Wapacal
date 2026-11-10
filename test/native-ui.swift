@@ -553,6 +553,41 @@ Task { @MainActor in
             (editorApp.saved["displaySizes"] as? [String: [String: Int]])?[
                 "custom"] == ["width": 3200, "height": 2000],
             "custom resolution is remembered independently of displays")
+
+        editorApp.screenPicker.selectItem(withTitle: "A4 landscape")
+        editorApp.changeScreen()
+        while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
+        editorApp.updateScreens()
+        try require(
+            editorApp.screenPicker.titleOfSelectedItem == "A4 landscape"
+                && ui.editor["width"] as? Int == 3508 && ui.editor["height"] as? Int == 2480,
+            "A4 landscape keeps its selection and uses 300 dpi dimensions")
+        try require(
+            !editorApp.applyButton.isEnabled && ui.imageSizeField.isHidden
+                && ui.exportMenu.isEnabled,
+            "A4 is available for export")
+        await editorApp.makeAndApply(force: true)
+        try require(!editorApp.rendering, "A4 skips wallpaper rendering")
+        let a4 =
+            try await editorApp.js("return await window.nativePNG()", updates: false)
+            as! [String: Any]
+        let a4Image = try loadImage(Data(base64Encoded: a4["png"] as! String)!)
+        let pdfURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["WAPACAL_UI_OUTPUT"]!)
+            .appendingPathComponent("a4-calendar.pdf")
+        try A4Paper.writePDF(a4Image, to: pdfURL)
+        let pdf = CGPDFDocument(pdfURL as CFURL)
+        let pageSize = pdf?.page(at: 1)?.getBoxRect(.mediaBox) ?? .zero
+        try require(
+            pdf?.numberOfPages == 1 && abs(pageSize.width - 841.89) < 0.01
+                && abs(pageSize.height - 595.28) < 0.01,
+            "PDF contains one A4 landscape page")
+        editorApp.screenPicker.selectItem(withTitle: "Custom resolution")
+        editorApp.changeScreen()
+        while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
+        try require(
+            ui.resolution.titleOfSelectedItem == "3200 × 2000",
+            "leaving A4 restores the custom resolution")
+
         editorApp.queueEditorPatch(["width": 2880, "height": 1800], automaticApply: false)
         while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
         try require(ui.showTitle.state == .off, "legacy title default")
@@ -966,8 +1001,15 @@ Task { @MainActor in
             (0..<ui.theme.segmentCount).map { ui.theme.label(forSegment: $0) } == [
                 "System", "Light", "Dark",
             ], "appearance choices")
+        let exportTitles = [
+            "PNG · Current appearance…", "PNG · Light…", "PNG · Dark…", "HEIC · Light and dark…",
+            "PDF · A4…",
+        ]
         try require(
-            ui.exportMenu.menu!.items.count == 5, "all export appearances remain accessible")
+            Array(ui.exportMenu.itemTitles.dropFirst()) == exportTitles
+                && NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "Export")?
+                    .submenu?.items.map(\.title) == exportTitles,
+            "both export menus offer PNG, HEIC, and PDF")
 
         try require(
             ui.colorTheme.itemTitles == [

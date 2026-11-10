@@ -1,5 +1,18 @@
 import AppKit
 import ServiceManagement
+import UniformTypeIdentifiers
+
+enum ExportFormat: String {
+    case png, heic, pdf
+
+    var contentType: UTType {
+        switch self {
+        case .png: .png
+        case .heic: .heic
+        case .pdf: .pdf
+        }
+    }
+}
 
 func launchedAtLogin(_ event: NSAppleEventDescriptor?) -> Bool {
     event?.eventID == kAEOpenApplication
@@ -314,7 +327,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         buildSettingsWindow()
         let root = NSView()
         _ = editorView.view
-        screenPicker.setAccessibilityLabel("Wallpaper display")
+        screenPicker.setAccessibilityLabel("Calendar output size")
         screenPicker.widthAnchor.constraint(lessThanOrEqualToConstant: 260).isActive = true
         let apply = applyButton
         apply.target = self
@@ -432,8 +445,8 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             }
         }
         editorView.canExport = { [weak self] in self?.ready == true && self?.exporting == false }
-        editorView.onExport = { [weak self] heic, theme in
-            self?.exportImage(heic: heic, theme: theme)
+        editorView.onExport = { [weak self] format, theme in
+            self?.exportCalendar(format, theme: theme)
         }
         engine.onFailure = { [weak self] error in
             self?.ready = false
@@ -473,12 +486,15 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 // The editor includes all calendar events; clear the retired course filter.
                 var editor = saved["editor"] as? [String: Any] ?? [:]
                 editor["course"] = ""
+                if a4Paper {
+                    editor.merge(A4Paper.previewDimensions) { _, size in size }
+                }
                 saved["editor"] = editor
                 _ = try await js("return window.nativeLoad(payload)", ["payload": saved])
                 ready = true
                 editorView.setReady(true)
                 updateDisplayResolution()
-                if !customResolution && !allDisplays { useDisplayResolution() }
+                if usesWallpaperDisplay && !allDisplays { useDisplayResolution() }
                 persist()
                 status.stringValue = "Saved calendar loaded. Your edits are saved automatically."
                 tick()
@@ -497,7 +513,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         editorChangeGeneration += 1
         let changeGeneration = editorChangeGeneration
         let selectionGeneration = displaySelectionGeneration
-        if let width = patch["width"] as? Int, let height = patch["height"] as? Int,
+        if !a4Paper, let width = patch["width"] as? Int, let height = patch["height"] as? Int,
             (1280...7680).contains(width), (720...4320).contains(height),
             let selection = saved["screen"] as? String
         {
@@ -532,7 +548,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         wallpaperWarningHeight?.constant = shared ? 56 : 0
     }
     func refreshWallpaperSharingWarning() {
-        showWallpaperSharingWarning(wallpaperSharesAllSpacesAndDisplays())
+        showWallpaperSharingWarning(!a4Paper && wallpaperSharesAllSpacesAndDisplays())
     }
     func applicationDidBecomeActive(_ notification: Notification) {
         refreshWallpaperSharingWarning()
@@ -865,18 +881,17 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         screenPicker.lastItem?.representedObject = "all"
         screenPicker.addItem(withTitle: "Custom resolution")
         screenPicker.lastItem?.representedObject = "custom"
-        if previous == "all" || previous == "custom" {
-            screenPicker.selectItem(
-                at: screenPicker.itemArray.firstIndex {
-                    $0.representedObject as? String == previous
-                }!)
-        } else if let index = screens.firstIndex(where: { screenID($0) == previous }) {
+        screenPicker.addItem(withTitle: "A4 landscape")
+        screenPicker.lastItem?.representedObject = "a4"
+        if let index = screenPicker.itemArray.firstIndex(where: {
+            $0.representedObject as? String == previous
+        }) {
             screenPicker.selectItem(at: index)
         } else if previous != nil {
             screenPicker.select(nil)
         }
         updateDisplayResolution()
-        guard ready, !customResolution,
+        guard ready, usesWallpaperDisplay,
             let selected = screenPicker.selectedItem?.representedObject as? String,
             allDisplays ? !changedDisplays.isEmpty : changedDisplays[selected] != nil
         else { return }
@@ -885,8 +900,9 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         if previous != nil, automatic.state == .on { requestWallpaperApply(force: false) }
     }
     @objc func changeScreen() {
+        window?.makeFirstResponder(nil)
         var sizes = saved["displaySizes"] as? [String: [String: Int]] ?? [:]
-        if let previous = saved["screen"] as? String, sizes[previous] == nil,
+        if !a4Paper, let previous = saved["screen"] as? String, sizes[previous] == nil,
             let width = editorView.editor["width"] as? Int,
             let height = editorView.editor["height"] as? Int
         {
@@ -897,13 +913,15 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         saved["screen"] = screenPicker.selectedItem?.representedObject as? String
         persist()
         updateDisplayResolution()
+        refreshWallpaperSharingWarning()
         guard ready, let selection = saved["screen"] as? String else { return }
         if selection == "all" {
             changePreviewResolution()
             return
         }
         var dimensions = customResolution ? sizes[selection] : nil
-        if !customResolution, let screen = try? targetScreen() {
+        if a4Paper { dimensions = A4Paper.previewDimensions }
+        if usesWallpaperDisplay, let screen = try? targetScreen() {
             let size = wallpaperPixelSize(screen)
             dimensions = ["width": Int(size.width), "height": Int(size.height)]
         }
@@ -915,13 +933,16 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     }
     var allDisplays: Bool { saved["screen"] as? String == "all" }
     var customResolution: Bool { saved["screen"] as? String == "custom" }
+    var a4Paper: Bool { saved["screen"] as? String == "a4" }
+    var usesWallpaperDisplay: Bool { !customResolution && !a4Paper }
     func updateDisplayResolution() {
         let button = editorView.displayResolution
         let resolution = editorView.resolution
         button.isHidden = true
+        screenPicker.isEnabled = ready
         editorView.imageSizeField.isHidden = !customResolution
-        applyButton.isEnabled = ready && !customResolution
-        applyButton.toolTip = customResolution ? "Choose a display to apply wallpaper." : nil
+        applyButton.isEnabled = ready && usesWallpaperDisplay
+        applyButton.toolTip = usesWallpaperDisplay ? nil : "Choose a display to apply wallpaper."
         editorView.previewResolution.isHidden = !allDisplays
         editorView.previewResolutionField.isHidden = !allDisplays
         if allDisplays {
@@ -954,7 +975,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         if resolution.item(withTitle: "Use screen sizes") != nil {
             editorView.updateResolutionMenu()
         }
-        resolution.isEnabled = ready
+        resolution.isEnabled = ready && !a4Paper
         guard let screen = try? targetScreen() else {
             button.title = "Choose a connected display"
             button.isEnabled = false
@@ -1088,7 +1109,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             }
         }
     }
-    func exportImage(heic: Bool, theme: String? = nil) {
+    func exportCalendar(_ format: ExportFormat, theme: String? = nil) {
         guard ready, !exporting else { return }
         exporting = true
         editorView.exportMenu.isEnabled = false
@@ -1102,33 +1123,44 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 guard lastEditorError == nil else { return }
                 let rendered =
                     try await js(
-                        heic
+                        format == .heic
                             ? "return await window.nativePair()"
-                            : "return await window.nativePNG(\(theme == "light" ? "'light'" : theme == "dark" ? "'dark'" : "null"))",
+                            : "return await window.nativePNG(theme || null)",
+                        ["theme": theme ?? ""],
                         updates: false) as? [String: Any]
                     ?? [:]
                 let panel = NSSavePanel()
-                panel.allowedContentTypes = heic ? [.heic] : [.png]
-                panel.nameFieldStringValue =
-                    heic ? "wapacal.heic" : theme.map { "wapacal-\($0).png" } ?? "wapacal.png"
+                panel.allowedContentTypes = [format.contentType]
+                let suffix = theme.map { "-\($0)" } ?? ""
+                panel.nameFieldStringValue = "wapacal\(suffix).\(format.rawValue)"
                 guard await panel.beginSheetModal(for: window) == .OK, let url = panel.url else {
                     return
                 }
-                if heic {
+                if format == .heic {
                     let parsed = try JSONDecoder().decode(
                         PairExport.self, from: JSONSerialization.data(withJSONObject: rendered))
                     guard let light = Data(base64Encoded: parsed.light),
                         let dark = Data(base64Encoded: parsed.dark)
                     else { throw WallpaperError.invalid("Could not render both appearances.") }
                     try encodePair(light: loadImage(light), dark: loadImage(dark), to: url)
+                    status.stringValue = "HEIC saved with light and dark appearances."
                 } else {
                     guard let png = rendered["png"] as? String, let bytes = Data(base64Encoded: png)
                     else { throw WallpaperError.invalid("Could not render the PNG.") }
-                    try bytes.write(to: url, options: .atomic)
+                    if format == .pdf {
+                        try A4Paper.writePDF(try loadImage(bytes), to: url)
+                        status.stringValue = "A4 PDF saved."
+                    } else {
+                        try bytes.write(to: url, options: .atomic)
+                        status.stringValue = "PNG saved."
+                    }
                 }
-                status.stringValue =
-                    heic ? "HEIC saved with light and dark appearances." : "PNG saved."
-            } catch { reportEditorError(error) }
+            } catch {
+                let detail =
+                    (error as NSError).userInfo["WKJavaScriptExceptionMessage"] as? String
+                    ?? error.localizedDescription
+                status.stringValue = "Could not export \(format.rawValue.uppercased()). \(detail)"
+            }
         }
     }
     var subscriptions: [[String: Any]] { saved["subscriptions"] as? [[String: Any]] ?? [] }
@@ -1888,7 +1920,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         }
     }
     @objc func applyNow() {
-        guard !customResolution else { return }
+        guard usesWallpaperDisplay else { return }
         window?.makeFirstResponder(nil)
         requestWallpaperApply(force: true)
     }
@@ -1902,7 +1934,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     func makeAndApply(force: Bool) async {
         refreshWallpaperSharingWarning()
         while pendingEdits > 0 { try? await Task.sleep(nanoseconds: 50_000_000) }
-        guard ready, !customResolution, lastEditorError == nil else { return }
+        guard ready, usesWallpaperDisplay, lastEditorError == nil else { return }
         if rendering {
             pendingApply = force || pendingApply == true
             return
@@ -2028,6 +2060,10 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 : "Wallpaper applied. The previous wallpaper file is unavailable for restoration.")
     }
     @objc func restore() {
+        guard !a4Paper else {
+            status.stringValue = "Choose a display to restore wallpaper."
+            return
+        }
         guard !rendering else {
             status.stringValue = "Wait for the current wallpaper operation to finish."
             return
@@ -2079,6 +2115,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 "subscriptions": [] as [[String: Any]], "courseCode": "", "refreshInterval": 3600.0,
                 "nextCheck": 0.0,
             ]
+            updateScreens()
             updateMessageVisibility()
             reloadSources()
             refreshPicker.selectItem(at: 2)

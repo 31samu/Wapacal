@@ -7,6 +7,7 @@ Turn your calendar into a Mac desktop wallpaper. Wapacal combines calendars on y
 
 - Choose which events appear and adjust the layout.
 - Export PNGs or a HEIC wallpaper that switches between light and dark with macOS.
+- Choose **A4 landscape** in the display picker, then **Export → PDF · A4…** to save a printable calendar.
 - Refresh calendars and update your wallpaper automatically while the app runs.
 - Restore your previous wallpaper from Settings.
 

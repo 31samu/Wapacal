@@ -30,6 +30,42 @@ func readBounded(_ url: URL) throws -> Data {
     return try Data(contentsOf: url)
 }
 
+enum A4Paper {
+    private static let width = 297.0
+    private static let height = 210.0
+    static let previewDimensions = [
+        "width": Int((width / 25.4 * 300).rounded()),
+        "height": Int((height / 25.4 * 300).rounded()),
+    ]
+
+    static func writePDF(_ image: CGImage, to url: URL) throws {
+        let pointsPerMillimeter = 72.0 / 25.4
+        let landscape = image.width >= image.height
+        var page = CGRect(
+            x: 0, y: 0, width: (landscape ? width : height) * pointsPerMillimeter,
+            height: (landscape ? height : width) * pointsPerMillimeter)
+        let buffer = NSMutableData()
+        guard let consumer = CGDataConsumer(data: buffer as CFMutableData),
+            let pdf = CGContext(consumer: consumer, mediaBox: &page, nil)
+        else { throw WallpaperError.invalid("Could not create the PDF.") }
+
+        let margin = 10 * pointsPerMillimeter
+        let printable = page.insetBy(dx: margin, dy: margin)
+        let scale = min(
+            printable.width / CGFloat(image.width), printable.height / CGFloat(image.height))
+        let imageWidth = CGFloat(image.width) * scale
+        let imageHeight = CGFloat(image.height) * scale
+        let bounds = CGRect(
+            x: page.midX - imageWidth / 2, y: page.midY - imageHeight / 2,
+            width: imageWidth, height: imageHeight)
+        pdf.beginPDFPage(nil)
+        pdf.draw(image, in: bounds)
+        pdf.endPDFPage()
+        pdf.closePDF()
+        try (buffer as Data).write(to: url, options: .atomic)
+    }
+}
+
 // Appearance mapping follows the format documented by wallpapper:
 // https://github.com/mczachurski/wallpapper#appearance
 // apple_desktop:apr contains a base64 binary plist, with l/d frame indices.
