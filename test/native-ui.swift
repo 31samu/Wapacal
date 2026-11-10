@@ -287,11 +287,24 @@ Task { @MainActor in
                 )
                 continue
             }
-            let pair =
+            let wallpaper =
                 try await editorApp.js(
-                    "return await window.nativePair(size)",
+                    "return await window.nativeWallpaper(size, '')",
                     ["size": ["width": Int(size.width), "height": Int(size.height)]], updates: false
                 ) as! [String: Any]
+            let pair = wallpaper["pair"] as! [String: Any]
+            let fingerprint = wallpaper["fingerprint"] as! String
+            let unchanged =
+                try await editorApp.js(
+                    "return await window.nativeWallpaper(size, fingerprint)",
+                    [
+                        "size": ["width": Int(size.width), "height": Int(size.height)],
+                        "fingerprint": fingerprint,
+                    ], updates: false
+                ) as! [String: Any]
+            try require(
+                unchanged["fingerprint"] as? String == fingerprint && unchanged["pair"] == nil,
+                "unchanged wallpaper skips both PNG renders")
             for theme in ["light", "dark"] {
                 let image = try loadImage(Data(base64Encoded: pair[theme] as! String)!)
                 try require(

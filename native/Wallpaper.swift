@@ -420,7 +420,7 @@ func backupURL(_ screen: NSScreen) -> URL {
     recoveryDirectory().appendingPathComponent("restore-\(screenID(screen)).json")
 }
 
-func applyWallpaper(_ url: URL, screen: NSScreen) throws -> Bool {
+func applyWallpaper(_ url: URL, screen: NSScreen) throws -> (url: URL, canRestore: Bool) {
     try ensureWorkspaceDirectories()
     let data = try readBounded(url)
     _ = try inspectData(data)
@@ -474,7 +474,7 @@ func applyWallpaper(_ url: URL, screen: NSScreen) throws -> Bool {
     }
     let record = try JSONDecoder().decode(WallpaperBackup.self, from: Data(contentsOf: backup))
     try? cleanupRuntimeFiles()
-    return record.canRestore
+    return (copy, record.canRestore)
 }
 
 func restoreWallpaper(screen: NSScreen) throws {
@@ -670,9 +670,9 @@ final class WallpaperApp: NSObject, NSApplicationDelegate {
                     "macOS is set to show one wallpaper on all Spaces and displays. Turn off “Show on all Spaces” in System Settings → Wallpaper before applying separate display wallpapers."
                 )
             }
-            let canRestore = try applyWallpaper(selected, screen: targetScreen())
+            let application = try applyWallpaper(selected, screen: targetScreen())
             status.stringValue =
-                canRestore
+                application.canRestore
                 ? "Applied. macOS controls the appearance. Your previous wallpaper is saved for restoration."
                 : "Applied. The previous wallpaper file is unavailable, so it cannot be restored by this app."
         } catch { showError(error) }

@@ -1,5 +1,4 @@
 import AppKit
-import CryptoKit
 import ServiceManagement
 
 func launchedAtLogin(_ event: NSAppleEventDescriptor?) -> Bool {
@@ -119,6 +118,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     private var pendingSourceSaves = 0
     let refreshPicker = NSPopUpButton()
     let screenPicker = NSPopUpButton()
+    private var connectedDisplaySizes: [String: NSSize] = [:]
     let applyButton = NSButton(title: "Apply wallpaper", target: nil, action: nil)
     let automatic = NSButton(
         checkboxWithTitle: "Update automatically while running", target: nil, action: nil)
@@ -130,7 +130,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     var fetching = false
     var refreshFailure: String?
     var rendering = false
-    var rerender = false
+    private var pendingApply: Bool?
     var displaySelectionGeneration = 0
     var dataGeneration = 0
     var timer: Timer?
@@ -156,6 +156,8 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                             ? stateURL : seed)) as? [String: Any]
             else { throw WallpaperError.invalid("Expected a settings object.") }
             saved = stored
+            saved.removeValue(forKey: "lastHash")
+            saved.removeValue(forKey: "displayHashes")
         } catch {
             stateReadable = false
             stateLoadError =
@@ -849,11 +851,13 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     }
     @objc func updateScreens() {
         let previous = saved["screen"] as? String
-        let wasConnected = screenPicker.itemArray.contains {
-            ($0.representedObject as? String) == previous
-        }
+        let screens = NSScreen.screens
+        let sizes = Dictionary(
+            uniqueKeysWithValues: screens.map { (screenID($0), wallpaperPixelSize($0)) })
+        let changedDisplays = sizes.filter { connectedDisplaySizes[$0.key] != $0.value }
+        connectedDisplaySizes = sizes
         screenPicker.removeAllItems()
-        for screen in NSScreen.screens {
+        for screen in screens {
             screenPicker.addItem(withTitle: screen.localizedName)
             screenPicker.lastItem?.representedObject = screenID(screen)
         }
@@ -866,21 +870,19 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 at: screenPicker.itemArray.firstIndex {
                     $0.representedObject as? String == previous
                 }!)
-        } else if let index = NSScreen.screens.firstIndex(where: { screenID($0) == previous }) {
+        } else if let index = screens.firstIndex(where: { screenID($0) == previous }) {
             screenPicker.selectItem(at: index)
         } else if previous != nil {
             screenPicker.select(nil)
         }
         updateDisplayResolution()
-        if ready, !customResolution, !allDisplays { useDisplayResolution() }
-        if ready, previous != nil, (!wasConnected || previous == "all"),
-            screenPicker.selectedItem != nil
-        {
-            saved.removeValue(forKey: "lastHash")
-            saved.removeValue(forKey: "displayHashes")
-            persist()
-            if automatic.state == .on { applyNow() }
-        }
+        guard ready, !customResolution,
+            let selected = screenPicker.selectedItem?.representedObject as? String,
+            allDisplays ? !changedDisplays.isEmpty : changedDisplays[selected] != nil
+        else { return }
+        displaySelectionGeneration &+= 1
+        if !allDisplays { useDisplayResolution() }
+        if previous != nil, automatic.state == .on { requestWallpaperApply(force: false) }
     }
     @objc func changeScreen() {
         var sizes = saved["displaySizes"] as? [String: [String: Int]] ?? [:]
@@ -893,8 +895,6 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         }
         displaySelectionGeneration &+= 1
         saved["screen"] = screenPicker.selectedItem?.representedObject as? String
-        saved.removeValue(forKey: "lastHash")
-        saved.removeValue(forKey: "displayHashes")
         persist()
         updateDisplayResolution()
         guard ready, let selection = saved["screen"] as? String else { return }
@@ -1642,7 +1642,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 let changed = try await js("return window.nativeDay()")
                 if changed as? Bool == true {
                     persist()
-                    if automatic.state == .on { applyNow() }
+                    if automatic.state == .on { requestWallpaperApply(force: false) }
                 }
             } catch { status.stringValue = error.localizedDescription }
         }
@@ -1865,10 +1865,13 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     @objc func applyNow() {
         guard !customResolution else { return }
         window?.makeFirstResponder(nil)
+        requestWallpaperApply(force: true)
+    }
+    private func requestWallpaperApply(force: Bool) {
         let pendingSave = sourceSaveTask
         Task { @MainActor in
             await pendingSave?.value
-            await makeAndApply(force: true)
+            await makeAndApply(force: force)
         }
     }
     func makeAndApply(force: Bool) async {
@@ -1876,15 +1879,15 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         while pendingEdits > 0 { try? await Task.sleep(nanoseconds: 50_000_000) }
         guard ready, !customResolution, lastEditorError == nil else { return }
         if rendering {
-            rerender = true
+            pendingApply = force || pendingApply == true
             return
         }
         rendering = true
         defer {
             rendering = false
-            if rerender {
-                rerender = false
-                Task { @MainActor in await makeAndApply(force: false) }
+            if let pending = pendingApply {
+                pendingApply = nil
+                Task { @MainActor in await makeAndApply(force: pending) }
             }
         }
         do {
@@ -1901,6 +1904,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                     (screenID($0), NSWorkspace.shared.desktopImageURL(for: $0)?.standardizedFileURL)
                 })
             var failures: [String] = []
+            var applied = 0
             for screen in screens {
                 do {
                     let size = wallpaperPixelSize(screen)
@@ -1909,32 +1913,44 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                     }
                     let dimensions: [String: Any] =
                         ["width": Int(size.width), "height": Int(size.height)]
+                    let installed = force ? "" : installedFingerprint(on: screen)
                     guard
-                        let pair = try await js(
-                            "return await window.nativePair(size)", ["size": dimensions],
+                        let result = try await js(
+                            "return await window.nativeWallpaper(size, installed)",
+                            ["size": dimensions, "installed": installed],
                             updates: false
-                        ) as? [String: Any]
+                        ) as? [String: Any],
+                        let fingerprint = result["fingerprint"] as? String
                     else {
                         throw WallpaperError.invalid("Could not render the wallpaper.")
                     }
-                    guard saved["screen"] as? String == selection else {
-                        rerender = true
-                        return
-                    }
-                    guard displaySelectionGeneration == operationGeneration else {
-                        rerender = true
+                    guard saved["screen"] as? String == selection,
+                        displaySelectionGeneration == operationGeneration
+                    else {
+                        pendingApply = force || pendingApply == true
                         return
                     }
                     guard NSScreen.screens.contains(where: { screenID($0) == screenID(screen) })
                     else {
                         throw WallpaperError.invalid("Display disconnected.")
                     }
-                    try install(pair, screen: screen, force: force)
+                    if fingerprint == installed {
+                        // The active Space can change while WebKit checks the images.
+                        if installedFingerprint(on: screen) != installed, pendingApply == nil {
+                            pendingApply = false
+                        }
+                        continue
+                    }
+                    guard let pair = result["pair"] as? [String: Any] else {
+                        throw WallpaperError.invalid("Could not render the wallpaper.")
+                    }
+                    try install(pair, screen: screen, fingerprint: fingerprint)
+                    applied += 1
                 } catch {
                     failures.append("\(screen.localizedName): \(error.localizedDescription)")
                 }
             }
-            if !allDisplays, failures.isEmpty {
+            if applied > 0, !allDisplays, failures.isEmpty {
                 let targetIDs = Set(screens.map(screenID))
                 let changedOther = NSScreen.screens.first { other in
                     guard !targetIDs.contains(screenID(other)) else { return false }
@@ -1949,33 +1965,40 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             }
             if !failures.isEmpty {
                 status.stringValue = failures.joined(separator: " ")
-            } else if allDisplays && refreshFailure == nil {
+            } else if allDisplays && applied > 0 && refreshFailure == nil {
                 status.stringValue =
-                    "Wallpaper applied to \(screens.count) displays at their own resolutions."
+                    "Wallpaper updated on \(applied) of \(screens.count) connected displays."
             }
         } catch { status.stringValue = "Wallpaper kept. \(error.localizedDescription)" }
     }
-    func install(_ pair: [String: Any], screen: NSScreen, force: Bool) throws {
-        let data = try JSONSerialization.data(withJSONObject: pair, options: [.sortedKeys])
-        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        var hashes = saved["displayHashes"] as? [String: String] ?? [:]
-        if !force && hashes[screenID(screen)] == digest {
-            return
-        }
+    private func installedFingerprint(on screen: NSScreen) -> String {
+        let installations = saved["installedWallpapers"] as? [String: [String: String]]
+        guard let record = installations?[screenID(screen)],
+            let path = record["path"],
+            NSWorkspace.shared.desktopImageURL(for: screen)?.standardizedFileURL.path == path,
+            FileManager.default.fileExists(atPath: path)
+        else { return "" }
+        return record["fingerprint"] ?? ""
+    }
+    private func install(_ pair: [String: Any], screen: NSScreen, fingerprint: String) throws {
+        let data = try JSONSerialization.data(withJSONObject: pair)
         let parsed = try JSONDecoder().decode(PairExport.self, from: data)
         guard let light = Data(base64Encoded: parsed.light),
             let dark = Data(base64Encoded: parsed.dark)
         else { throw WallpaperError.invalid("Could not render both appearances.") }
         let file = wallpapersDirectory().appendingPathComponent("editor-wallpaper.heic")
         try encodePair(light: loadImage(light), dark: loadImage(dark), to: file)
-        let restorable = try applyWallpaper(file, screen: screen)
-        hashes[screenID(screen)] = digest
-        saved["displayHashes"] = hashes
+        let application = try applyWallpaper(file, screen: screen)
+        var installations = saved["installedWallpapers"] as? [String: [String: String]] ?? [:]
+        installations[screenID(screen)] = [
+            "fingerprint": fingerprint, "path": application.url.standardizedFileURL.path,
+        ]
+        saved["installedWallpapers"] = installations
         if !allDisplays { saved["screen"] = screenID(screen) }
         persist()
         status.stringValue =
             refreshFailure
-            ?? (restorable
+            ?? (application.canRestore
                 ? "Wallpaper applied. macOS switches between light and dark."
                 : "Wallpaper applied. The previous wallpaper file is unavailable for restoration.")
     }
@@ -1987,8 +2010,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         do {
             automatic.state = .off
             saved["autoApply"] = false
-            saved.removeValue(forKey: "lastHash")
-            saved.removeValue(forKey: "displayHashes")
+            saved.removeValue(forKey: "installedWallpapers")
             persist()
             var failures: [String] = []
             for screen in try targetScreens() {

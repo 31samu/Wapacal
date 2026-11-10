@@ -261,7 +261,7 @@ window.nativePNG = async function (theme) {
   );
   return { revision: currentRevision, png };
 };
-window.nativePair = async function (size = {}) {
+function renderPair(size) {
   // Capture both SVGs before yielding so edits cannot mix two different calendars.
   const options = {
     ...state,
@@ -270,6 +270,20 @@ window.nativePair = async function (size = {}) {
   };
   const lightSVG = renderWallpaper(data.events, { ...options, theme: 'light' }).svg;
   const darkSVG = renderWallpaper(data.events, { ...options, theme: 'dark' }).svg;
-  const name = state.name;
+  return { name: state.name, lightSVG, darkSVG };
+}
+async function rasterizePair({ name, lightSVG, darkSVG }) {
   return { version: 1, name, light: await pngBase64(lightSVG), dark: await pngBase64(darkSVG) };
+}
+window.nativePair = async function (size = {}) {
+  return rasterizePair(renderPair(size));
+};
+window.nativeWallpaper = async function (size, installedFingerprint) {
+  const images = renderPair(size);
+  const input = new TextEncoder().encode(JSON.stringify([images.lightSVG, images.darkSVG]));
+  const digest = await crypto.subtle.digest('SHA-256', input);
+  const fingerprint = btoa(String.fromCharCode(...new Uint8Array(digest)));
+  return fingerprint === installedFingerprint
+    ? { fingerprint }
+    : { fingerprint, pair: await rasterizePair(images) };
 };
