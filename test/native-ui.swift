@@ -903,8 +903,9 @@ Task { @MainActor in
         editorApp.reloadSources(selected: "legacy")
         finishCalendarEdit(editorApp.urlField, "https://example.invalid/updated.ics")
         let urlDeadline = Date().addingTimeInterval(10)
+        // The URL save clears nextCheck before its follow-up refresh is queued.
         while (editorApp.subscriptions[0]["url"] as? String != "https://example.invalid/updated.ics"
-            || editorApp.fetching) && Date() < urlDeadline
+            || editorApp.nextCheck <= Date() || editorApp.fetching) && Date() < urlDeadline
         {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
@@ -912,6 +913,9 @@ Task { @MainActor in
             editorApp.subscriptions[0]["url"] as? String == "https://example.invalid/updated.ics"
                 && editorApp.subscriptions[0]["ics"] == nil,
             "URL autosave replaces the URL and clears events from the previous subscription")
+        try require(
+            editorApp.nextCheck > Date() && !editorApp.fetching,
+            "the URL change's follow-up refresh completes before restoring the fixture")
         editorApp.saved["subscriptions"] = originalSources
         editorApp.saved["nextCheck"] = Date().addingTimeInterval(86400).timeIntervalSince1970
         _ = try await editorApp.js(
@@ -930,8 +934,11 @@ Task { @MainActor in
             }
             try require(!editorApp.fetching, "calendar color change completed")
             let expected = choice == "Custom" ? "#336699" : choice.lowercased()
+            let savedColor = editorApp.subscriptions[0]["color"] as? String
             try require(
-                editorApp.subscriptions[0]["color"] as? String == expected, "calendar color saved")
+                savedColor == expected,
+                "calendar color saved as \(expected), got \(savedColor ?? "none"). \(editorApp.status.stringValue)"
+            )
             let snapshot =
                 try await editorApp.js("return window.nativeSnapshot()", updates: false)
                 as! [String: Any]
@@ -1481,7 +1488,10 @@ Task { @MainActor in
         hideTestApplication()
         application.terminate(nil)
     } catch {
-        fputs(error.localizedDescription + "\n", stderr)
+        let detail =
+            (error as NSError).userInfo["WKJavaScriptExceptionMessage"] as? String
+            ?? error.localizedDescription
+        fputs(detail + "\n", stderr)
         hideTestApplication()
         exit(1)
     }

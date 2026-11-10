@@ -307,7 +307,8 @@ async function pngBase64(svg) {
     }
     canvas.width = image.naturalWidth;
     canvas.height = image.naturalHeight;
-    const context = canvas.getContext('2d');
+    // PNG encoding reads the entire canvas. Keep the pixels in software memory.
+    const context = canvas.getContext('2d', { willReadFrequently: true });
     if (!context) throw new Error('Could not allocate the wallpaper canvas.');
     context.drawImage(image, 0, 0);
     const png = canvas.toDataURL('image/png').split(',')[1];
