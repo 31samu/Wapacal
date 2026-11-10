@@ -16,11 +16,16 @@ func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(de
 // No EventKit requests or personal calendar access in this fixture app.
 final class FixtureLocalCalendars: LocalCalendarProviding {
     var hasAccess = true
+    var canPromptForAccess = false
+    var accessRequests = 0
     var removed = false
     var missing = false
     var temporaryFailure = false
     var requests: [(String, String)] = []
-    func requestAccess() async throws -> Bool { hasAccess }
+    func requestAccess() async throws -> Bool {
+        accessRequests += 1
+        return hasAccess
+    }
     func calendars() async throws -> [LocalCalendarInfo] {
         (0..<24).map { index in
             LocalCalendarInfo(
@@ -1217,6 +1222,21 @@ Task { @MainActor in
         try require(editorApp.window.isVisible, "menu bar reopen")
         let fake = FixtureLocalCalendars()
         editorApp.localCalendars = fake
+        fake.hasAccess = false
+        fake.canPromptForAccess = true
+        editorApp.saved["subscriptions"] = [["id": "feed", "url": "https://example.invalid"]]
+        await editorApp.requestStartupCalendarAccess()
+        editorApp.saved["subscriptions"] = [["provider": "eventkit", "enabled": false]]
+        await editorApp.requestStartupCalendarAccess()
+        try require(fake.accessRequests == 0, "startup skips feeds and disabled local calendars")
+        editorApp.saved["subscriptions"] = [
+            ["provider": "eventkit", "calendarIdentifier": "fixture-0"]
+        ]
+        await editorApp.requestStartupCalendarAccess()
+        try require(fake.accessRequests == 1, "startup requests access for a saved local calendar")
+        fake.canPromptForAccess = false
+        await editorApp.requestStartupCalendarAccess()
+        try require(fake.accessRequests == 1, "startup skips a resolved permission decision")
         editorApp.saved["subscriptions"] = [] as [[String: Any]]
         editorApp.automatic.state = .off
         editorApp.saveTimer?.invalidate()

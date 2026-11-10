@@ -25,6 +25,7 @@ enum LocalCalendarError: LocalizedError {
 
 protocol LocalCalendarProviding {
     var hasAccess: Bool { get }
+    var canPromptForAccess: Bool { get }
     func requestAccess() async throws -> Bool
     func calendars() async throws -> [LocalCalendarInfo]
     func snapshot(identifier: String, from: String, to: String) async throws -> [String: Any]
@@ -34,6 +35,11 @@ protocol LocalCalendarProviding {
 final class EventKitCalendarProvider: LocalCalendarProviding, @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.samuelkremer.wapacal.eventkit")
     private lazy var store = EKEventStore()
+    var canPromptForAccess: Bool {
+        let status = EKEventStore.authorizationStatus(for: .event)
+        if #available(macOS 14.0, *), status == .writeOnly { return true }
+        return status == .notDetermined
+    }
     var hasAccess: Bool {
         if #available(macOS 14.0, *) {
             return EKEventStore.authorizationStatus(for: .event) == .fullAccess

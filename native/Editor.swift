@@ -445,6 +445,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(tick), name: NSWorkspace.didWakeNotification, object: nil)
         Task { @MainActor in
+            await requestStartupCalendarAccess()
             do {
                 try await engine.start()
                 workerStarted = true
