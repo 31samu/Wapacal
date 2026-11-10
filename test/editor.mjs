@@ -88,6 +88,28 @@ test('system is the default appearance and is a valid preview setting', async ()
   dom.window.close();
 });
 
+test('preview reuses the validated render and updates when system appearance changes', async () => {
+  const { dom, w } = await setup();
+  const render = w.renderWallpaper;
+  let renders = 0;
+  w.renderWallpaper = (...args) => {
+    renders++;
+    return render(...args);
+  };
+  w.pngBase64 = async (svg) => svg;
+  w.nativeAppearance('light');
+  w.nativeUpdate({ name: 'Updated module' });
+  const light = w.nativeSnapshot();
+  assert.equal((await w.nativePNG()).png, light.svg);
+  assert.equal(renders, 1);
+  w.nativeAppearance('dark');
+  const dark = w.nativeSnapshot();
+  assert.notEqual(dark.svg, light.svg);
+  assert.equal((await w.nativePNG()).png, dark.svg);
+  assert.equal(renders, 2);
+  dom.window.close();
+});
+
 test('wallpaper matches the shared renderer exactly and preserves plain event details', async () => {
   const { dom, seed, snapshot } = await setup();
   const current = snapshot();
@@ -324,6 +346,50 @@ test('multiple subscriptions retain independent identities and validate before r
   assert.ok(snapshot().editor.excludedEventIds.includes('same'));
   w.nativeCalendars([], '2026-09-09T12:00:00Z');
   assert.equal(snapshot().events.length, 0);
+  dom.window.close();
+});
+
+test('a refresh batch keeps invalid and unchecked sources while accepting later valid sources', async () => {
+  const { dom, w, seed, snapshot } = await setup();
+  const sources = [
+    { id: 'invalid', name: 'Invalid', ics: calendar(session('original', 'Saved event')) },
+    { id: 'changed', ics: calendar(session('old', 'Old event')) },
+    {
+      id: 'untouched',
+      ics: calendar(),
+      checkedAt: '2026-11-05T12:00:00Z',
+      history: {
+        version: 1,
+        events: parseCalendars([
+          { id: 'untouched', legacyIds: true, ics: calendar(session('history', 'Saved history')) },
+        ]).events,
+      },
+    },
+  ];
+  w.nativeLoad({
+    ...seed,
+    subscriptions: sources,
+    editor: { mode: 'month', month: '2026-09', course: '' },
+  });
+  const fetchedAt = '2026-11-05T12:00:00Z';
+  const result = w.nativeRefresh(sources, [
+    { index: 0, source: { ...sources[0], fetchedAt, ics: 'invalid ICS' } },
+    {
+      index: 1,
+      source: { ...sources[1], fetchedAt, ics: calendar(session('old', 'Updated event')) },
+    },
+  ]);
+  assert.equal(result.changed, true);
+  assert.equal(result.failures.length, 1);
+  assert.equal(result.subscriptions[0].ics, sources[0].ics);
+  assert.match(result.subscriptions[0].error, /./);
+  assert.deepEqual(result.subscriptions[2], sources[2]);
+  assert.deepEqual(
+    snapshot()
+      .events.map((event) => event.title)
+      .sort(),
+    ['Saved event', 'Saved history', 'Updated event'],
+  );
   dom.window.close();
 });
 

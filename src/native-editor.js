@@ -54,6 +54,22 @@ let data = { name: 'Calendar', events: [] };
 let calendarSources = [];
 let courseCode = config.course || '';
 let revision = 0;
+let currentRender;
+
+function renderState(nextData, options) {
+  return {
+    appearance: resolveTheme(options.theme, options.systemTheme),
+    result: renderWallpaper(nextData.events, options),
+  };
+}
+
+function editorRender() {
+  const options = renderOptions(state);
+  if (currentRender?.appearance !== resolveTheme(options.theme, options.systemTheme))
+    currentRender = renderState(data, options);
+  return currentRender.result;
+}
+
 function advancedDay(previous) {
   const today = localParts(new Date(), previous.timeZone).date;
   return {
@@ -67,7 +83,7 @@ function advancedDay(previous) {
 }
 function commit(nextData, next) {
   // All replacements are transactional, including invalid date ranges and dimensions.
-  renderWallpaper(nextData.events, renderOptions(next));
+  currentRender = renderState(nextData, renderOptions(next));
   data = nextData;
   state = next;
   revision++;
@@ -202,6 +218,49 @@ window.nativeCalendars = function (subscriptions, fetchedAt) {
   calendarSources = reconciled;
   return reconciled;
 };
+window.nativeRefresh = function (subscriptions, candidates) {
+  const failures = [];
+  // Each candidate still has to pass combined layout validation. Reuse the
+  // normalized events of other sources for as long as the date window matches.
+  const caches = new Map();
+  let changed = false;
+  for (const { index, source } of candidates) {
+    const previous = subscriptions[index];
+    const remote = source.provider !== 'eventkit';
+    try {
+      let options = state;
+      let refreshed = source;
+      if (remote) {
+        [refreshed] = reconcileSubscriptions(
+          [previous],
+          [source],
+          source.fetchedAt,
+          state.timeZone,
+        );
+        options = {
+          ...advancedDay(state),
+          snapshotDate: localParts(source.fetchedAt, state.timeZone).date,
+        };
+      }
+      const key = JSON.stringify(recurrenceWindow(options, options.timeZone));
+      if (!caches.has(key)) caches.set(key, new WeakMap());
+      const next = subscriptions.slice();
+      next[index] = refreshed;
+      commit(parseCalendars(next, options.timeZone, options, caches.get(key)), options);
+      subscriptions = next;
+      changed = true;
+    } catch (error) {
+      if (remote) {
+        subscriptions[index] = { ...previous, error: error.message };
+        failures.push(`${source.name ?? 'Calendar'}: ${error.message}`);
+      } else {
+        failures.push(error.message);
+      }
+    }
+  }
+  if (changed) calendarSources = subscriptions;
+  return { subscriptions, failures, changed };
+};
 window.nativeDay = function () {
   const next = advancedDay(state);
   return next.today === state.today
@@ -209,7 +268,7 @@ window.nativeDay = function () {
     : commit(parseCalendars(calendarSources, next.timeZone, next), next);
 };
 window.nativeSnapshot = function () {
-  const result = renderWallpaper(data.events, renderOptions(state));
+  const result = editorRender();
   const candidates = buildGrid(data.events, { ...state, excludedEventIds: [] }).visible;
   return {
     revision,
@@ -256,9 +315,10 @@ async function pngBase64(svg) {
 }
 window.nativePNG = async function (theme) {
   const currentRevision = revision;
-  const png = await pngBase64(
-    renderWallpaper(data.events, renderOptions(theme ? { ...state, theme } : state)).svg,
-  );
+  const result = theme
+    ? renderWallpaper(data.events, renderOptions({ ...state, theme }))
+    : editorRender();
+  const png = await pngBase64(result.svg);
   return { revision: currentRevision, png };
 };
 function renderPair(size) {

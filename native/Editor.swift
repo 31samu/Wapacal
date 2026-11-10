@@ -1705,7 +1705,8 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             let range: [String: String]
             do {
                 guard
-                    let result = try await js("return window.nativeCalendarWindow()")
+                    let result = try await js(
+                        "return window.nativeCalendarWindow()", updates: false)
                         as? [String: String]
                 else {
                     throw WallpaperError.invalid("Could not determine the calendar date range.")
@@ -1723,12 +1724,14 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 status.stringValue = error.localizedDescription
                 return
             }
+            var candidates = [[String: Any]?](repeating: nil, count: sources.count)
             for index in sources.indices {
                 guard generation == dataGeneration else { return }
                 let source = sources[index]
                 let isLocal = source["provider"] as? String == "eventkit"
                 if localOnly && !isLocal { continue }
                 if isLocal {
+                    var candidate = source
                     do {
                         // Revocation also clears disabled calendars' cached private events.
                         if !localCalendars.hasAccess { throw LocalCalendarError.accessUnavailable }
@@ -1741,28 +1744,20 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                         let snapshot = try await localCalendars.snapshot(
                             identifier: identifier, from: from, to: to)
                         guard generation == dataGeneration else { return }
-                        sources[index]["snapshot"] = snapshot
-                        sources[index]["fetchedAt"] = ISO8601DateFormatter().string(from: Date())
-                        sources[index].removeValue(forKey: "error")
+                        candidate["snapshot"] = snapshot
+                        candidate["fetchedAt"] = ISO8601DateFormatter().string(from: Date())
+                        candidate.removeValue(forKey: "error")
                     } catch {
                         guard generation == dataGeneration else { return }
                         if error is LocalCalendarError {
-                            sources[index].removeValue(forKey: "snapshot")
+                            candidate.removeValue(forKey: "snapshot")
                         }
-                        sources[index]["error"] = error.localizedDescription
+                        candidate["error"] = error.localizedDescription
                         failures.append(
                             "\(source["name"] as? String ?? "Calendar"): \(error.localizedDescription)"
                         )
                     }
-                    do {
-                        _ = try await js(
-                            "return window.nativeSources(subscriptions,clearCourse)",
-                            ["subscriptions": sources, "clearCourse": false])
-                    } catch {
-                        sources[index] = source
-                        failures.append(error.localizedDescription)
-                    }
-                    guard generation == dataGeneration else { return }
+                    candidates[index] = candidate
                     continue
                 }
                 if source["enabled"] as? Bool == false { continue }
@@ -1805,24 +1800,17 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                         var candidate = source
                         candidate["ics"] = ics
                         candidate["fetchedAt"] = now
+                        candidate["checkedAt"] = now
                         candidate["etag"] = http.value(forHTTPHeaderField: "ETag")
                         candidate["modified"] = http.value(forHTTPHeaderField: "Last-Modified")
-                        var next = sources
-                        next[index] = candidate
-                        guard
-                            let reconciled = try await js(
-                                "return window.nativeCalendars(subscriptions,fetchedAt)",
-                                ["subscriptions": next, "fetchedAt": now]) as? [[String: Any]]
-                        else {
-                            throw WallpaperError.invalid("Could not save calendar history.")
-                        }
-                        guard generation == dataGeneration else { return }
-                        sources = reconciled
-                    } else if http.statusCode != 304 || source["ics"] == nil {
+                        candidate.removeValue(forKey: "error")
+                        candidates[index] = candidate
+                    } else if http.statusCode == 304 && source["ics"] != nil {
+                        sources[index]["checkedAt"] = now
+                        sources[index].removeValue(forKey: "error")
+                    } else {
                         throw WallpaperError.invalid("HTTP \(http.statusCode).")
                     }
-                    sources[index]["checkedAt"] = now
-                    sources[index].removeValue(forKey: "error")
                 } catch {
                     guard generation == dataGeneration else { return }
                     let detail =
@@ -1830,6 +1818,43 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                         ?? error.localizedDescription
                     sources[index]["error"] = detail
                     failures.append("\(source["name"] as? String ?? "Calendar"): \(detail)")
+                }
+            }
+            guard generation == dataGeneration else { return }
+            if !localCalendars.hasAccess {
+                for index in sources.indices
+                where sources[index]["provider"] as? String == "eventkit"
+                    && (sources[index]["snapshot"] != nil || candidates[index]?["snapshot"] != nil)
+                {
+                    sources[index].removeValue(forKey: "snapshot")
+                    var candidate = candidates[index] ?? sources[index]
+                    candidate.removeValue(forKey: "snapshot")
+                    candidate["error"] = LocalCalendarError.accessUnavailable.localizedDescription
+                    candidates[index] = candidate
+                }
+            }
+            let changes: [[String: Any]] = candidates.enumerated().compactMap { index, source in
+                source.map { ["index": index, "source": $0] }
+            }
+            if !changes.isEmpty {
+                do {
+                    guard
+                        let result = try await js(
+                            "return window.nativeRefresh(subscriptions, candidates)",
+                            ["subscriptions": sources, "candidates": changes], updates: false
+                        ) as? [String: Any],
+                        let refreshed = result["subscriptions"] as? [[String: Any]],
+                        let errors = result["failures"] as? [String],
+                        let changed = result["changed"] as? Bool
+                    else {
+                        throw WallpaperError.invalid("Could not save refreshed calendars.")
+                    }
+                    sources = refreshed
+                    failures.append(contentsOf: errors)
+                    if changed { _ = try await js("return true;") }
+                } catch {
+                    guard generation == dataGeneration else { return }
+                    failures.append(error.localizedDescription)
                 }
             }
             guard generation == dataGeneration else { return }
