@@ -597,10 +597,24 @@ Task { @MainActor in
                     == #selector(editorApp.refreshAndApplyNow),
             "compact menu bar refresh-and-apply action")
         let calendarMenu = mainMenu.items.first { $0.title == "Calendar" }!.submenu!
+        let refresh = calendarMenu.items.first { $0.title == "Refresh" }
+        let refreshAndApply = calendarMenu.items.first { $0.title == "Refresh & Apply" }
+        let applyWallpaper = calendarMenu.items.first { $0.title == "Apply Wallpaper" }
         try require(
-            calendarMenu.items.first?.title == "Refresh & Apply"
-                && calendarMenu.items.first?.action == #selector(editorApp.refreshAndApplyNow),
-            "Calendar menu refresh-and-apply action")
+            refresh?.action == #selector(editorApp.refreshNow)
+                && refresh?.keyEquivalent == "r"
+                && refresh?.keyEquivalentModifierMask == .command,
+            "Calendar menu Command-R refresh shortcut")
+        try require(
+            refreshAndApply?.action == #selector(editorApp.refreshAndApplyNow)
+                && refreshAndApply?.keyEquivalent.lowercased() == "r"
+                && refreshAndApply?.keyEquivalentModifierMask == [.command, .shift],
+            "Calendar menu Shift-Command-R refresh-and-apply shortcut")
+        try require(
+            applyWallpaper?.action == #selector(editorApp.applyNow)
+                && applyWallpaper?.keyEquivalent == "\r"
+                && applyWallpaper?.keyEquivalentModifierMask == .command,
+            "Calendar menu Command-Return apply shortcut")
         let fileMenu = mainMenu.items.first { $0.title == "File" }!.submenu!
         try require(
             fileMenu.items.first?.title == "Open wallpaper…"

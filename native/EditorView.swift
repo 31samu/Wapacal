@@ -412,13 +412,13 @@ final class EditorViewController: NSViewController, NSMenuItemValidation, NSTabl
         moduleFields = Self.stack([field("Module name", name), dateRange])
         monthField = field("Month", EditorDateField(picker: month, title: "Month"))
         exportMenu.addItem(withTitle: "Export")
-        for (title, action) in [
-            ("PNG · Current appearance…", #selector(exportPNG)),
-            ("PNG · Light…", #selector(exportLightPNG)),
-            ("PNG · Dark…", #selector(exportDarkPNG)),
-            ("HEIC · Light and dark…", #selector(exportHEIC)),
+        for (title, action, key) in [
+            ("PNG · Current appearance…", #selector(exportPNG), ""),
+            ("PNG · Light…", #selector(exportLightPNG), ""),
+            ("PNG · Dark…", #selector(exportDarkPNG), ""),
+            ("HEIC · Light and dark…", #selector(exportHEIC), "e"),
         ] {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
             item.target = self
             exportMenu.menu?.addItem(item)
         }

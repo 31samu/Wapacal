@@ -207,6 +207,11 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         settings.target = self
         appMenu.addItem(settings)
         appMenu.addItem(.separator())
+        let hide = NSMenuItem(
+            title: "Hide Wapacal", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        hide.target = NSApp
+        appMenu.addItem(hide)
+        appMenu.addItem(.separator())
         appMenu.addItem(quit)
         appItem.submenu = appMenu
 
@@ -247,9 +252,18 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         calendarItem.title = "Calendar"
         let calendarMenu = NSMenu(title: "Calendar")
         let refresh = NSMenuItem(
-            title: "Refresh & Apply", action: #selector(refreshAndApplyNow), keyEquivalent: "r")
+            title: "Refresh", action: #selector(refreshNow), keyEquivalent: "r")
         refresh.target = self
         calendarMenu.addItem(refresh)
+        let refreshAndApply = NSMenuItem(
+            title: "Refresh & Apply", action: #selector(refreshAndApplyNow), keyEquivalent: "R")
+        refreshAndApply.target = self
+        refreshAndApply.keyEquivalentModifierMask = [.command, .shift]
+        calendarMenu.addItem(refreshAndApply)
+        let applyWallpaper = NSMenuItem(
+            title: "Apply Wallpaper", action: #selector(applyNow), keyEquivalent: "\r")
+        applyWallpaper.target = self
+        calendarMenu.addItem(applyWallpaper)
         calendarItem.submenu = calendarMenu
         menu.addItem(calendarItem)
 
@@ -260,6 +274,10 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             title: "Close Window", action: #selector(closeWindow), keyEquivalent: "w")
         close.target = self
         windowMenu.addItem(close)
+        let hideWindow = NSMenuItem(
+            title: "Hide Window", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        hideWindow.target = NSApp
+        windowMenu.addItem(hideWindow)
         windowItem.submenu = windowMenu
         menu.addItem(windowItem)
         NSApp.mainMenu = menu
@@ -1516,7 +1534,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             finishLocalRefresh()
             guard succeeded else { return }
             if key == "url" {
-                refreshNow()
+                refreshAfterSavingSource(apply: false)
             } else if automatic.state == .on {
                 await makeAndApply(force: false)
             }
@@ -1573,7 +1591,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             guard generation == dataGeneration else { return }
             fetching = false
             finishLocalRefresh()
-            if succeeded { refreshNow() }
+            if succeeded { refreshAfterSavingSource(apply: false) }
         }
     }
     func updateMessageVisibility() {
@@ -1630,21 +1648,26 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         }
         if nextCheck <= Date() { beginRefresh(force: false) }
     }
-    @objc func refreshNow() { refreshAfterSavingSource(apply: false) }
+    @objc func refreshNow() { refreshAfterSavingSource(apply: false, allowAutomaticApply: false) }
     @objc func refreshAndApplyNow() { refreshAfterSavingSource(apply: true) }
-    private func refreshAfterSavingSource(apply: Bool) {
+    private func refreshAfterSavingSource(apply: Bool, allowAutomaticApply: Bool = true) {
         window?.makeFirstResponder(nil)
         guard pendingSourceSaves > 0 else {
-            beginRefresh(force: true, applyAfterRefresh: apply)
+            beginRefresh(
+                force: true, applyAfterRefresh: apply, allowAutomaticApply: allowAutomaticApply)
             return
         }
         let pendingSave = sourceSaveTask
         Task { @MainActor in
             await pendingSave?.value
-            beginRefresh(force: true, applyAfterRefresh: apply)
+            beginRefresh(
+                force: true, applyAfterRefresh: apply, allowAutomaticApply: allowAutomaticApply)
         }
     }
-    func beginRefresh(force: Bool, applyAfterRefresh: Bool = false, localOnly: Bool = false) {
+    func beginRefresh(
+        force: Bool, applyAfterRefresh: Bool = false, localOnly: Bool = false,
+        allowAutomaticApply: Bool = true
+    ) {
         guard ready else { return }
         if fetching {
             if localOnly { localRefreshPending = true }
@@ -1830,7 +1853,9 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 refreshFailure
                 ?? "Calendars checked at \(Date().formatted(date:.omitted,time:.shortened))."
             localApplyPending = localApplyPending || applyAfterRefresh
-            if !localRefreshPending && (localApplyPending || automatic.state == .on) {
+            if !localRefreshPending
+                && (localApplyPending || (allowAutomaticApply && automatic.state == .on))
+            {
                 let forceApply = localApplyPending
                 localApplyPending = false
                 await makeAndApply(force: forceApply)
