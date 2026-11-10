@@ -96,13 +96,13 @@ try {
   const layout = (await readFile('src/layout.mjs', 'utf8')).replace(/^export /gm, '');
   const suggestions = (await readFile('src/suggestions.mjs', 'utf8')).replace(/^export /gm, '');
   const editor = await readFile('src/native-editor.js', 'utf8');
-  const { subscriptionUrl, subscriptions, ...workerConfig } = config;
+  const { subscriptions, ...workerConfig } = config;
   const scriptJson = (value) =>
     JSON.stringify(value)
       .replace(/</g, '\\u003c')
       .replace(/\u2028/g, '\\u2028')
       .replace(/\u2029/g, '\\u2029');
-  // No preview template or browser editor is shipped in the application.
+  // The worker has no browser interface.
   await writeFile(
     `${resources}/calendar-worker.html`,
     `<!doctype html><html><head><meta charset="utf-8">

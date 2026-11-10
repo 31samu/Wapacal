@@ -1,8 +1,11 @@
 import ICAL from 'ical.js';
 
+const localFormatters = new Map();
+
 export function localParts(instant, timeZone) {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat('en-GB', {
+  let formatter = localFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-GB', {
       timeZone,
       year: 'numeric',
       month: '2-digit',
@@ -10,9 +13,12 @@ export function localParts(instant, timeZone) {
       hour: '2-digit',
       minute: '2-digit',
       hourCycle: 'h23',
-    })
-      .formatToParts(new Date(instant))
-      .map((p) => [p.type, p.value]),
+    });
+    // An omitted zone follows the system default, which can change while the app runs.
+    if (typeof timeZone === 'string') localFormatters.set(timeZone, formatter);
+  }
+  const parts = Object.fromEntries(
+    formatter.formatToParts(new Date(instant)).map((p) => [p.type, p.value]),
   );
   return {
     date: `${parts.year}-${parts.month}-${parts.day}`,
@@ -366,7 +372,7 @@ export function reconcileSubscriptions(
     const priorEvents = new Map();
     if (sameCalendar) {
       for (const event of historyEvents(previous, timeZone)) priorEvents.set(event.uid, event);
-      if (previous.ics)
+      if (previous.ics && (previous.ics !== source.ics || previous.kind !== source.kind))
         for (const event of parseCalendar(previous.ics, timeZone, previous.kind || 'auto', {
           today: fetchedAt,
         }).events)
@@ -460,8 +466,47 @@ function snapshotEvents(source, timeZone) {
   });
 }
 
+function parseCalendarSource(source, timeZone, options) {
+  const native = source.provider === 'eventkit';
+  const parsed = native
+    ? {
+        name: source.name || 'Calendar',
+        events: snapshotEvents(source, timeZone),
+        cancelledUids: [],
+      }
+    : parseCalendar(source.ics, timeZone, source.kind || 'auto', options);
+  const liveUids = new Set(parsed.events.map((event) => event.uid));
+  const sourceEvents = new Map(
+    (native ? [] : historyEvents(source, timeZone))
+      .filter(
+        (event) =>
+          !parsed.cancelledUids.includes(event.uid) &&
+          !(
+            event.seriesUid &&
+            (parsed.seriesUids.includes(event.seriesUid) ||
+              liveUids.has(event.seriesUid) ||
+              parsed.cancelledUids.includes(event.seriesUid))
+          ),
+      )
+      .map((event) => [event.uid, event]),
+  );
+  for (const event of parsed.events) sourceEvents.set(event.uid, event);
+  return {
+    name: parsed.name,
+    events: Array.from(sourceEvents.values(), (event) => ({
+      ...event,
+      uid: source.legacyIds ? event.uid : JSON.stringify([source.id, event.uid]),
+      sourceId: source.id,
+      sourceName: source.name || parsed.name,
+      sourceColor: source.color,
+      originalUid: event.uid,
+    })),
+  };
+}
+
 // Source IDs stay local and never contain the subscription URL or its credentials.
-export function parseCalendars(subscriptions, timeZone = 'Europe/Stockholm', options = {}) {
+// A source cache may be shared within one time zone and recurrence window.
+export function parseCalendars(subscriptions, timeZone = 'Europe/Stockholm', options = {}, cache) {
   const ids = new Set();
   const events = [];
   let name = 'Calendars';
@@ -470,42 +515,14 @@ export function parseCalendars(subscriptions, timeZone = 'Europe/Stockholm', opt
     ids.add(source.id);
     if (source.provider && !['ics', 'eventkit'].includes(source.provider))
       throw new Error('Unknown calendar provider.');
-    if (source.enabled === false) continue;
-    const native = source.provider === 'eventkit';
-    if (!native && !source.ics) continue;
-    const parsed = native
-      ? {
-          name: source.name || 'Calendar',
-          events: snapshotEvents(source, timeZone),
-          cancelledUids: [],
-        }
-      : parseCalendar(source.ics, timeZone, source.kind || 'auto', options);
+    if (source.enabled === false || (source.provider !== 'eventkit' && !source.ics)) continue;
+    let parsed = cache?.get(source);
+    if (!parsed) {
+      parsed = parseCalendarSource(source, timeZone, options);
+      cache?.set(source, parsed);
+    }
     if (source.legacyIds) name = parsed.name;
-    const liveUids = new Set(parsed.events.map((event) => event.uid));
-    const sourceEvents = new Map(
-      (native ? [] : historyEvents(source, timeZone))
-        .filter(
-          (event) =>
-            !parsed.cancelledUids.includes(event.uid) &&
-            !(
-              event.seriesUid &&
-              (parsed.seriesUids.includes(event.seriesUid) ||
-                liveUids.has(event.seriesUid) ||
-                parsed.cancelledUids.includes(event.seriesUid))
-            ),
-        )
-        .map((event) => [event.uid, event]),
-    );
-    for (const event of parsed.events) sourceEvents.set(event.uid, event);
-    for (const event of sourceEvents.values())
-      events.push({
-        ...event,
-        uid: source.legacyIds ? event.uid : JSON.stringify([source.id, event.uid]),
-        sourceId: source.id,
-        sourceName: source.name || parsed.name,
-        sourceColor: source.color,
-        originalUid: event.uid,
-      });
+    for (const event of parsed.events) events.push(event);
   }
   if (new Set(events.map((event) => event.uid)).size !== events.length)
     throw new Error('Duplicate combined event ID.');

@@ -2,6 +2,15 @@ import AppKit
 import EventKit
 
 extension EditorApp {
+    func requestStartupCalendarAccess() async {
+        guard localCalendars.canPromptForAccess,
+            subscriptions.contains(where: {
+                $0["provider"] as? String == "eventkit" && $0["enabled"] as? Bool != false
+            })
+        else { return }
+        // The first refresh reports unavailable access if the request fails or is declined.
+        _ = try? await localCalendars.requestAccess()
+    }
     func observeLocalCalendars() {
         localCalendarObserver = NotificationCenter.default.addObserver(
             forName: .EKEventStoreChanged, object: nil, queue: .main

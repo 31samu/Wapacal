@@ -16,11 +16,16 @@ func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(de
 // No EventKit requests or personal calendar access in this fixture app.
 final class FixtureLocalCalendars: LocalCalendarProviding {
     var hasAccess = true
+    var canPromptForAccess = false
+    var accessRequests = 0
     var removed = false
     var missing = false
     var temporaryFailure = false
     var requests: [(String, String)] = []
-    func requestAccess() async throws -> Bool { hasAccess }
+    func requestAccess() async throws -> Bool {
+        accessRequests += 1
+        return hasAccess
+    }
     func calendars() async throws -> [LocalCalendarInfo] {
         (0..<24).map { index in
             LocalCalendarInfo(
@@ -66,6 +71,19 @@ Task { @MainActor in
             try await Task.sleep(nanoseconds: 50_000_000)
         }
         try require(editorApp.ready, "startup: \(editorApp.status.stringValue)")
+        try require(editorApp.window.isVisible, "manual launch opens the editor")
+        try require(!launchedAtLogin(nil), "missing launch event is a manual launch")
+        let launchEvent = NSAppleEventDescriptor(
+            eventClass: kCoreEventClass, eventID: kAEOpenApplication,
+            targetDescriptor: nil, returnID: AEReturnID(kAutoGenerateReturnID),
+            transactionID: AETransactionID(kAnyTransactionID))
+        try require(!launchedAtLogin(launchEvent), "ordinary open event is a manual launch")
+        launchEvent.setParam(
+            NSAppleEventDescriptor(enumCode: keyAELaunchedAsLogInItem), forKeyword: keyAEPropData)
+        try require(launchedAtLogin(launchEvent), "login launch is detected")
+        launchEvent.setParam(
+            NSAppleEventDescriptor(enumCode: keyAELaunchedAsServiceItem), forKeyword: keyAEPropData)
+        try require(!launchedAtLogin(launchEvent), "service launch is distinct from login")
         editorApp.timer?.invalidate()
         for (shared, expected) in [("$null" as Any, false), (["Desktop": [:]] as Any, true)] {
             let data = try PropertyListSerialization.data(
@@ -269,11 +287,24 @@ Task { @MainActor in
                 )
                 continue
             }
-            let pair =
+            let wallpaper =
                 try await editorApp.js(
-                    "return await window.nativePair(size)",
+                    "return await window.nativeWallpaper(size, '')",
                     ["size": ["width": Int(size.width), "height": Int(size.height)]], updates: false
                 ) as! [String: Any]
+            let pair = wallpaper["pair"] as! [String: Any]
+            let fingerprint = wallpaper["fingerprint"] as! String
+            let unchanged =
+                try await editorApp.js(
+                    "return await window.nativeWallpaper(size, fingerprint)",
+                    [
+                        "size": ["width": Int(size.width), "height": Int(size.height)],
+                        "fingerprint": fingerprint,
+                    ], updates: false
+                ) as! [String: Any]
+            try require(
+                unchanged["fingerprint"] as? String == fingerprint && unchanged["pair"] == nil,
+                "unchanged wallpaper skips both PNG renders")
             for theme in ["light", "dark"] {
                 let image = try loadImage(Data(base64Encoded: pair[theme] as! String)!)
                 try require(
@@ -522,6 +553,45 @@ Task { @MainActor in
             (editorApp.saved["displaySizes"] as? [String: [String: Int]])?[
                 "custom"] == ["width": 3200, "height": 2000],
             "custom resolution is remembered independently of displays")
+
+        editorApp.screenPicker.selectItem(withTitle: "A4 landscape")
+        editorApp.changeScreen()
+        while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
+        editorApp.updateScreens()
+        try require(
+            editorApp.screenPicker.titleOfSelectedItem == "A4 landscape"
+                && ui.editor["width"] as? Int == 3508 && ui.editor["height"] as? Int == 2480,
+            "A4 landscape keeps its selection and uses 300 dpi dimensions")
+        try require(
+            !editorApp.applyButton.isEnabled && ui.imageSizeField.isHidden
+                && ui.exportMenu.isEnabled,
+            "A4 is available for export")
+        await editorApp.makeAndApply(force: true)
+        try require(!editorApp.rendering, "A4 skips wallpaper rendering")
+        let a4 =
+            try await editorApp.js(
+                "return await window.nativePNG()", updates: false) as? [String: Any]
+        guard let png = a4?["png"] as? String, let bytes = Data(base64Encoded: png),
+            !bytes.isEmpty
+        else { throw WallpaperError.invalid("The A4 renderer did not return PNG data.") }
+        let a4Image = try loadImage(bytes)
+        try require(a4Image.width == 3508 && a4Image.height == 2480, "A4 PNG dimensions")
+        let pdfURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["WAPACAL_UI_OUTPUT"]!)
+            .appendingPathComponent("a4-calendar.pdf")
+        try A4Paper.writePDF(a4Image, to: pdfURL)
+        let pdf = CGPDFDocument(pdfURL as CFURL)
+        let pageSize = pdf?.page(at: 1)?.getBoxRect(.mediaBox) ?? .zero
+        try require(
+            pdf?.numberOfPages == 1 && abs(pageSize.width - 841.89) < 0.01
+                && abs(pageSize.height - 595.28) < 0.01,
+            "PDF contains one A4 landscape page")
+        editorApp.screenPicker.selectItem(withTitle: "Custom resolution")
+        editorApp.changeScreen()
+        while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
+        try require(
+            ui.resolution.titleOfSelectedItem == "3200 × 2000",
+            "leaving A4 restores the custom resolution")
+
         editorApp.queueEditorPatch(["width": 2880, "height": 1800], automaticApply: false)
         while editorApp.pendingEdits > 0 { try await Task.sleep(nanoseconds: 50_000_000) }
         try require(ui.showTitle.state == .off, "legacy title default")
@@ -579,10 +649,24 @@ Task { @MainActor in
                     == #selector(editorApp.refreshAndApplyNow),
             "compact menu bar refresh-and-apply action")
         let calendarMenu = mainMenu.items.first { $0.title == "Calendar" }!.submenu!
+        let refresh = calendarMenu.items.first { $0.title == "Refresh" }
+        let refreshAndApply = calendarMenu.items.first { $0.title == "Refresh & Apply" }
+        let applyWallpaper = calendarMenu.items.first { $0.title == "Apply Wallpaper" }
         try require(
-            calendarMenu.items.first?.title == "Refresh & Apply"
-                && calendarMenu.items.first?.action == #selector(editorApp.refreshAndApplyNow),
-            "Calendar menu refresh-and-apply action")
+            refresh?.action == #selector(editorApp.refreshNow)
+                && refresh?.keyEquivalent == "r"
+                && refresh?.keyEquivalentModifierMask == .command,
+            "Calendar menu Command-R refresh shortcut")
+        try require(
+            refreshAndApply?.action == #selector(editorApp.refreshAndApplyNow)
+                && refreshAndApply?.keyEquivalent.lowercased() == "r"
+                && refreshAndApply?.keyEquivalentModifierMask == [.command, .shift],
+            "Calendar menu Shift-Command-R refresh-and-apply shortcut")
+        try require(
+            applyWallpaper?.action == #selector(editorApp.applyNow)
+                && applyWallpaper?.keyEquivalent == "\r"
+                && applyWallpaper?.keyEquivalentModifierMask == .command,
+            "Calendar menu Command-Return apply shortcut")
         let fileMenu = mainMenu.items.first { $0.title == "File" }!.submenu!
         try require(
             fileMenu.items.first?.title == "Open wallpaper…"
@@ -819,8 +903,9 @@ Task { @MainActor in
         editorApp.reloadSources(selected: "legacy")
         finishCalendarEdit(editorApp.urlField, "https://example.invalid/updated.ics")
         let urlDeadline = Date().addingTimeInterval(10)
+        // The URL save clears nextCheck before its follow-up refresh is queued.
         while (editorApp.subscriptions[0]["url"] as? String != "https://example.invalid/updated.ics"
-            || editorApp.fetching) && Date() < urlDeadline
+            || editorApp.nextCheck <= Date() || editorApp.fetching) && Date() < urlDeadline
         {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
@@ -828,6 +913,9 @@ Task { @MainActor in
             editorApp.subscriptions[0]["url"] as? String == "https://example.invalid/updated.ics"
                 && editorApp.subscriptions[0]["ics"] == nil,
             "URL autosave replaces the URL and clears events from the previous subscription")
+        try require(
+            editorApp.nextCheck > Date() && !editorApp.fetching,
+            "the URL change's follow-up refresh completes before restoring the fixture")
         editorApp.saved["subscriptions"] = originalSources
         editorApp.saved["nextCheck"] = Date().addingTimeInterval(86400).timeIntervalSince1970
         _ = try await editorApp.js(
@@ -846,8 +934,11 @@ Task { @MainActor in
             }
             try require(!editorApp.fetching, "calendar color change completed")
             let expected = choice == "Custom" ? "#336699" : choice.lowercased()
+            let savedColor = editorApp.subscriptions[0]["color"] as? String
             try require(
-                editorApp.subscriptions[0]["color"] as? String == expected, "calendar color saved")
+                savedColor == expected,
+                "calendar color saved as \(expected), got \(savedColor ?? "none"). \(editorApp.status.stringValue)"
+            )
             let snapshot =
                 try await editorApp.js("return window.nativeSnapshot()", updates: false)
                 as! [String: Any]
@@ -921,8 +1012,15 @@ Task { @MainActor in
             (0..<ui.theme.segmentCount).map { ui.theme.label(forSegment: $0) } == [
                 "System", "Light", "Dark",
             ], "appearance choices")
+        let exportTitles = [
+            "PNG · Current appearance…", "PNG · Light…", "PNG · Dark…", "HEIC · Light and dark…",
+            "PDF · A4…",
+        ]
         try require(
-            ui.exportMenu.menu!.items.count == 5, "all export appearances remain accessible")
+            Array(ui.exportMenu.itemTitles.dropFirst()) == exportTitles
+                && NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "Export")?
+                    .submenu?.items.map(\.title) == exportTitles,
+            "both export menus offer PNG, HEIC, and PDF")
 
         try require(
             ui.colorTheme.itemTitles == [
@@ -1111,7 +1209,7 @@ Task { @MainActor in
         rejected = false
         do {
             _ = try await editorApp.js(
-                "return window.nativeFeed(ics,date)",
+                "return window.nativeCalendars([{id: 'invalid', ics}],date)",
                 ["ics": "invalid ICS", "date": "2026-09-08T12:00:00Z"])
         } catch { rejected = true }
         try require(rejected && ui.events.count > 0, "invalid feed retention")
@@ -1204,6 +1302,21 @@ Task { @MainActor in
         try require(editorApp.window.isVisible, "menu bar reopen")
         let fake = FixtureLocalCalendars()
         editorApp.localCalendars = fake
+        fake.hasAccess = false
+        fake.canPromptForAccess = true
+        editorApp.saved["subscriptions"] = [["id": "feed", "url": "https://example.invalid"]]
+        await editorApp.requestStartupCalendarAccess()
+        editorApp.saved["subscriptions"] = [["provider": "eventkit", "enabled": false]]
+        await editorApp.requestStartupCalendarAccess()
+        try require(fake.accessRequests == 0, "startup skips feeds and disabled local calendars")
+        editorApp.saved["subscriptions"] = [
+            ["provider": "eventkit", "calendarIdentifier": "fixture-0"]
+        ]
+        await editorApp.requestStartupCalendarAccess()
+        try require(fake.accessRequests == 1, "startup requests access for a saved local calendar")
+        fake.canPromptForAccess = false
+        await editorApp.requestStartupCalendarAccess()
+        try require(fake.accessRequests == 1, "startup skips a resolved permission decision")
         editorApp.saved["subscriptions"] = [] as [[String: Any]]
         editorApp.automatic.state = .off
         editorApp.saveTimer?.invalidate()
@@ -1375,7 +1488,10 @@ Task { @MainActor in
         hideTestApplication()
         application.terminate(nil)
     } catch {
-        fputs(error.localizedDescription + "\n", stderr)
+        let detail =
+            (error as NSError).userInfo["WKJavaScriptExceptionMessage"] as? String
+            ?? error.localizedDescription
+        fputs(detail + "\n", stderr)
         hideTestApplication()
         exit(1)
     }

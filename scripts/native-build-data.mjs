@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { loadSnapshots } from '../src/subscriptions.mjs';
 
-// Public builds never read local settings, snapshots, or CALENDAR_URL.
+// Public builds never read local settings or snapshots.
 export async function loadNativeBuildData({ privateSeed = false } = {}) {
   if (!privateSeed) {
     const example = JSON.parse(await readFile('config.example.json', 'utf8'));

@@ -25,6 +25,7 @@ enum LocalCalendarError: LocalizedError {
 
 protocol LocalCalendarProviding {
     var hasAccess: Bool { get }
+    var canPromptForAccess: Bool { get }
     func requestAccess() async throws -> Bool
     func calendars() async throws -> [LocalCalendarInfo]
     func snapshot(identifier: String, from: String, to: String) async throws -> [String: Any]
@@ -34,6 +35,11 @@ protocol LocalCalendarProviding {
 final class EventKitCalendarProvider: LocalCalendarProviding, @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.samuelkremer.wapacal.eventkit")
     private lazy var store = EKEventStore()
+    var canPromptForAccess: Bool {
+        let status = EKEventStore.authorizationStatus(for: .event)
+        if #available(macOS 14.0, *), status == .writeOnly { return true }
+        return status == .notDetermined
+    }
     var hasAccess: Bool {
         if #available(macOS 14.0, *) {
             return EKEventStore.authorizationStatus(for: .event) == .fullAccess
@@ -93,6 +99,11 @@ final class EventKitCalendarProvider: LocalCalendarProviding, @unchecked Sendabl
                         throw LocalCalendarError.calendarMissing
                     }
                     let iso = ISO8601DateFormatter()
+                    let day = DateFormatter()
+                    day.calendar = Calendar(identifier: .gregorian)
+                    day.locale = Locale(identifier: "en_US_POSIX")
+                    day.timeZone = NSTimeZone.default
+                    day.dateFormat = "yyyy-MM-dd"
                     guard let lower = iso.date(from: from + "T00:00:00Z"),
                         let upper = iso.date(from: to + "T00:00:00Z"), lower < upper
                     else {
@@ -107,7 +118,7 @@ final class EventKitCalendarProvider: LocalCalendarProviding, @unchecked Sendabl
                             withStart: start, end: end, calendars: [calendar])
                         for event in self.store.events(matching: predicate) {
                             guard event.status != .canceled else { continue }
-                            let record = try Self.record(event, iso: iso)
+                            let record = try Self.record(event, iso: iso, day: day)
                             let uid = record["uid"] as! String
                             if let previous = events[uid],
                                 !NSDictionary(dictionary: previous).isEqual(to: record)
@@ -135,19 +146,15 @@ final class EventKitCalendarProvider: LocalCalendarProviding, @unchecked Sendabl
             }
         }
     }
-    private static func record(_ event: EKEvent, iso: ISO8601DateFormatter) throws -> [String: Any]
-    {
+    private static func record(
+        _ event: EKEvent, iso: ISO8601DateFormatter, day: DateFormatter
+    ) throws -> [String: Any] {
         // The original occurrence date survives moving one instance of a recurring event.
         // External IDs help survive resyncs; the source ID added by JS separates calendars.
         guard let startDate = event.startDate, let endDate = event.endDate else {
             throw WallpaperError.invalid("A local calendar event is missing its dates.")
         }
         let identity = event.calendarItemExternalIdentifier ?? event.calendarItemIdentifier
-        let day = DateFormatter()
-        day.calendar = Calendar(identifier: .gregorian)
-        day.locale = Locale(identifier: "en_US_POSIX")
-        day.timeZone = NSTimeZone.default
-        day.dateFormat = "yyyy-MM-dd"
         let occurrence =
             (event.hasRecurrenceRules || event.isDetached)
             ? event.occurrenceDate.map {

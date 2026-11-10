@@ -2,16 +2,35 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { loadFixtureApp } from './helpers/fixture-app.mjs';
-import { parseCalendar } from '../src/calendar.mjs';
+import { parseCalendars } from '../src/calendar.mjs';
 import { renderWallpaper } from '../src/layout.mjs';
 
 async function setup() {
   const { editor, seed } = await loadFixtureApp();
-  const dom = new JSDOM(editor, { runScripts: 'dangerously', url: 'https://worker.invalid' });
+  const dom = new JSDOM(editor, {
+    runScripts: 'dangerously',
+    url: 'https://worker.invalid',
+    beforeParse(window) {
+      const RealDate = window.Date;
+      window.Date = class extends RealDate {
+        constructor(...args) {
+          super(...(args.length ? args : ['2026-11-05T12:00:00Z']));
+        }
+        static now() {
+          return new RealDate('2026-11-05T12:00:00Z').getTime();
+        }
+      };
+    },
+  });
   dom.window.nativeLoad(seed);
   const snapshot = () => JSON.parse(JSON.stringify(dom.window.nativeSnapshot()));
   return { dom, w: dom.window, seed, snapshot };
 }
+const fixtureSubscriptions = (ics, fetchedAt) => [
+  { id: 'legacy', legacyIds: true, ics, fetchedAt },
+];
+const refresh = (worker, ics, fetchedAt) =>
+  worker.nativeCalendars(fixtureSubscriptions(ics, fetchedAt), fetchedAt);
 const calendar = (...events) =>
   `BEGIN:VCALENDAR\r\nVERSION:2.0\r\n${events.join('')}END:VCALENDAR\r\n`;
 const session = (uid, title, date = '20260908') =>
@@ -51,11 +70,11 @@ test('saved settings, custom dimensions, unknown fields and exclusions survive l
   assert.equal(snapshot().editor.includeWeekends, true);
   assert.match(snapshot().svg, />SATURDAY<.*>SUNDAY</s);
   assert.equal(snapshot().editor.width, 2880);
-  w.nativeFeed(seed.ics, '2026-09-07T12:00:00Z');
+  refresh(w, seed.subscriptions[0].ics, '2026-09-07T12:00:00Z');
   assert.doesNotMatch(snapshot().svg, /Launch presentation/);
   assert.deepEqual(snapshot().editor.futureSetting, { enabled: true });
   const before = snapshot();
-  assert.throws(() => w.nativeFeed('invalid ICS', '2026-09-08T12:00:00Z'));
+  assert.throws(() => refresh(w, 'invalid ICS', '2026-09-08T12:00:00Z'));
   assert.deepEqual(snapshot(), before);
   dom.window.close();
 });
@@ -69,14 +88,67 @@ test('system is the default appearance and is a valid preview setting', async ()
   dom.window.close();
 });
 
+test('preview reuses the validated render and updates when system appearance changes', async () => {
+  const { dom, w } = await setup();
+  const render = w.renderWallpaper;
+  let renders = 0;
+  w.renderWallpaper = (...args) => {
+    renders++;
+    return render(...args);
+  };
+  w.pngBase64 = async (svg) => svg;
+  w.nativeAppearance('light');
+  w.nativeUpdate({ name: 'Updated module' });
+  const light = w.nativeSnapshot();
+  assert.equal((await w.nativePNG()).png, light.svg);
+  assert.equal(renders, 1);
+  w.nativeAppearance('dark');
+  const dark = w.nativeSnapshot();
+  assert.notEqual(dark.svg, light.svg);
+  assert.equal((await w.nativePNG()).png, dark.svg);
+  assert.equal(renders, 2);
+  dom.window.close();
+});
+
+test('PNG rendering releases the canvas even when encoding fails', async () => {
+  const { dom, w } = await setup();
+  w.URL.createObjectURL = () => 'blob:fixture';
+  w.URL.revokeObjectURL = () => {};
+  w.Image = class {
+    naturalWidth = 3508;
+    naturalHeight = 2480;
+    set src(_) {
+      this.onload();
+    }
+  };
+  let canvas;
+  let encoded = 'data:,';
+  w.HTMLCanvasElement.prototype.getContext = function () {
+    canvas = this;
+    return { drawImage() {} };
+  };
+  w.HTMLCanvasElement.prototype.toDataURL = () => encoded;
+
+  await assert.rejects(w.nativePNG(), /Could not encode the wallpaper PNG/);
+  assert.equal(canvas.width, 0);
+  encoded = 'data:image/png;base64,cG5n';
+  assert.equal((await w.nativePNG()).png, 'cG5n');
+  assert.equal(canvas.width, 0);
+  dom.window.close();
+});
+
 test('wallpaper matches the shared renderer exactly and preserves plain event details', async () => {
   const { dom, seed, snapshot } = await setup();
   const current = snapshot();
   assert.equal(
     current.svg,
-    renderWallpaper(parseCalendar(seed.ics, current.editor.timeZone).events, current.editor).svg,
+    renderWallpaper(
+      parseCalendars(seed.subscriptions, current.editor.timeZone).events,
+      current.editor,
+    ).svg,
   );
-  dom.window.nativeFeed(
+  refresh(
+    dom.window,
     calendar(
       session('markup', '<script>alert(1)</script>').replace(
         'END:VEVENT',
@@ -140,10 +212,12 @@ test('refresh retains recent completed events, drops future omissions, and persi
   const { dom, w, seed, snapshot } = await setup();
   w.nativeLoad({
     ...seed,
-    ics: calendar(
-      session('kept', 'Original'),
-      session('deleted', 'Completed event'),
-      session('future', 'Future event', '20260921'),
+    subscriptions: fixtureSubscriptions(
+      calendar(
+        session('kept', 'Original'),
+        session('deleted', 'Completed event'),
+        session('future', 'Future event', '20260921'),
+      ),
     ),
     editor: {
       mode: 'module',
@@ -155,7 +229,8 @@ test('refresh retains recent completed events, drops future omissions, and persi
   });
   assert.equal(snapshot().includedCount, 2);
   assert.equal(snapshot().events.length, 3);
-  w.nativeFeed(
+  refresh(
+    w,
     calendar(
       session('kept', 'Moved', '20260909'),
       session('new', 'New session'),
@@ -171,14 +246,16 @@ test('refresh retains recent completed events, drops future omissions, and persi
   assert.equal(before.events.find((e) => e.uid === 'kept').included, false);
   assert.throws(
     () =>
-      w.nativeFeed(
+      refresh(
+        w,
         calendar(session('duplicate', 'One'), session('duplicate', 'Two')),
         '2026-09-09T12:00:00Z',
       ),
     /duplicate/,
   );
   assert.deepEqual(snapshot(), before);
-  const persistedSources = w.nativeFeed(
+  const persistedSources = refresh(
+    w,
     calendar('BEGIN:VEVENT\r\nUID:deleted\r\nSTATUS:CANCELLED\r\nEND:VEVENT\r\n'),
     '2026-09-09T12:00:00Z',
   );
@@ -210,7 +287,7 @@ test('wake, startup, and refresh advance a following month across year end and p
       };
       w.nativeLoad({
         ...seed,
-        ics: calendar(),
+        subscriptions: fixtureSubscriptions(calendar()),
         editor: {
           mode: 'month',
           month: following ? '2026-12' : '2026-09',
@@ -221,8 +298,13 @@ test('wake, startup, and refresh advance a following month across year end and p
       const previous = snapshot().editor;
       now = '2026-12-31T23:30:00Z';
       if (action === 'day') assert.equal(w.nativeDay(), true);
-      else if (action === 'feed') w.nativeFeed(calendar(), now);
-      else w.nativeLoad({ ...seed, ics: calendar(), editor: previous });
+      else if (action === 'feed') refresh(w, calendar(), now);
+      else
+        w.nativeLoad({
+          ...seed,
+          subscriptions: fixtureSubscriptions(calendar()),
+          editor: previous,
+        });
       assert.equal(snapshot().editor.today, '2027-01-01');
       assert.equal(snapshot().editor.month, following ? '2027-01' : '2026-09');
       assert.equal(w.nativeDay(), false);
@@ -294,6 +376,50 @@ test('multiple subscriptions retain independent identities and validate before r
   dom.window.close();
 });
 
+test('a refresh batch keeps invalid and unchecked sources while accepting later valid sources', async () => {
+  const { dom, w, seed, snapshot } = await setup();
+  const sources = [
+    { id: 'invalid', name: 'Invalid', ics: calendar(session('original', 'Saved event')) },
+    { id: 'changed', ics: calendar(session('old', 'Old event')) },
+    {
+      id: 'untouched',
+      ics: calendar(),
+      checkedAt: '2026-11-05T12:00:00Z',
+      history: {
+        version: 1,
+        events: parseCalendars([
+          { id: 'untouched', legacyIds: true, ics: calendar(session('history', 'Saved history')) },
+        ]).events,
+      },
+    },
+  ];
+  w.nativeLoad({
+    ...seed,
+    subscriptions: sources,
+    editor: { mode: 'month', month: '2026-09', course: '' },
+  });
+  const fetchedAt = '2026-11-05T12:00:00Z';
+  const result = w.nativeRefresh(sources, [
+    { index: 0, source: { ...sources[0], fetchedAt, ics: 'invalid ICS' } },
+    {
+      index: 1,
+      source: { ...sources[1], fetchedAt, ics: calendar(session('old', 'Updated event')) },
+    },
+  ]);
+  assert.equal(result.changed, true);
+  assert.equal(result.failures.length, 1);
+  assert.equal(result.subscriptions[0].ics, sources[0].ics);
+  assert.match(result.subscriptions[0].error, /./);
+  assert.deepEqual(result.subscriptions[2], sources[2]);
+  assert.deepEqual(
+    snapshot()
+      .events.map((event) => event.title)
+      .sort(),
+    ['Saved event', 'Saved history', 'Updated event'],
+  );
+  dom.window.close();
+});
+
 test('both export appearances capture the same revision even if settings change while rasterizing', async () => {
   const { dom, w, snapshot } = await setup();
   const frames = [];
@@ -318,8 +444,10 @@ test('both export appearances capture the same revision even if settings change 
 test('navigating outside the default recurrence window expands events and preserves occurrence exclusions', async () => {
   const { dom, w, snapshot } = await setup();
   w.nativeLoad({
-    ics: calendar(
-      session('weekly', 'Repeated').replace('END:VEVENT', 'RRULE:FREQ=WEEKLY\r\nEND:VEVENT'),
+    subscriptions: fixtureSubscriptions(
+      calendar(
+        session('weekly', 'Repeated').replace('END:VEVENT', 'RRULE:FREQ=WEEKLY\r\nEND:VEVENT'),
+      ),
     ),
     editor: { mode: 'month', month: '2030-09', course: '' },
   });
@@ -514,13 +642,14 @@ test('unconfigured custom colors default to neutral and light boxes respect cust
   w.nativeUpdate({ colorTheme: 'custom', theme: 'light', eventStyle: 'boxes', customColors });
   const current = snapshot();
   const doc = new JSDOM(current.svg, { contentType: 'image/svg+xml' }).window.document;
-  const boxes = [...doc.querySelectorAll('rect')].filter((rect) => rect.getAttribute('rx') === '5');
-  assert.ok(boxes.length > 0);
-  for (const box of boxes) {
-    let next = box.nextElementSibling;
-    if (next.tagName !== 'text') next = next.nextElementSibling;
-    assert.equal(next.getAttribute('fill'), '#123456');
-  }
+  const titles = new Set(
+    current.events.filter((event) => event.included).map((event) => event.title),
+  );
+  const eventText = [...doc.querySelectorAll('text')].filter(
+    (node) => Number(node.getAttribute('font-size')) === 14 && titles.has(node.textContent),
+  );
+  assert.ok(eventText.length > 0);
+  for (const text of eventText) assert.equal(text.getAttribute('fill'), '#123456');
   dom.window.close();
 });
 

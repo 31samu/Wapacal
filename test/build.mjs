@@ -11,11 +11,11 @@ const snapshotsModule = pathToFileURL(resolve('src/subscriptions.mjs')).href;
 
 test('public build data is identical in fresh and private workspaces', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'wapacal-build-data-'));
-  const run = (body, calendarURL = '') => {
+  const run = (body) => {
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', body], {
       cwd: dir,
       encoding: 'utf8',
-      env: { ...process.env, CALENDAR_URL: calendarURL },
+      env: process.env,
     });
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout);
@@ -49,18 +49,7 @@ test('public build data is identical in fresh and private workspaces', async () 
       join(dir, 'data/calendars.json'),
       JSON.stringify({ subscriptions: [{ ...source, ics: 'PRIVATE_EVENTS' }] }),
     );
-    await writeFile(join(dir, 'data/calendar.ics'), 'PRIVATE_LEGACY_EVENTS');
-    await writeFile(
-      join(dir, 'data/source.json'),
-      JSON.stringify({ fetchedAt: 'PRIVATE_METADATA' }),
-    );
     assert.deepEqual(build(false), clean);
-    const environmentBuild = run(
-      `import {loadNativeBuildData} from ${JSON.stringify(buildModule)};
-      console.log(JSON.stringify(await loadNativeBuildData()));`,
-      source.url,
-    );
-    assert.deepEqual(environmentBuild, clean);
     assert.equal(build(true).seed.subscriptions[0].ics, 'PRIVATE_EVENTS');
 
     await writeFile(join(dir, 'config.local.json'), 'invalid json');

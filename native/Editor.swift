@@ -1,6 +1,24 @@
 import AppKit
-import CryptoKit
 import ServiceManagement
+import UniformTypeIdentifiers
+
+enum ExportFormat: String {
+    case png, heic, pdf
+
+    var contentType: UTType {
+        switch self {
+        case .png: .png
+        case .heic: .heic
+        case .pdf: .pdf
+        }
+    }
+}
+
+func launchedAtLogin(_ event: NSAppleEventDescriptor?) -> Bool {
+    event?.eventID == kAEOpenApplication
+        && event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue
+            == keyAELaunchedAsLogInItem
+}
 
 func savedRefreshInterval(_ value: Double?) -> TimeInterval {
     let choices: Set<Double> = [900, 1800, 3600, 10800, 21600, 43200, 86400]
@@ -113,6 +131,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     private var pendingSourceSaves = 0
     let refreshPicker = NSPopUpButton()
     let screenPicker = NSPopUpButton()
+    private var connectedDisplaySizes: [String: NSSize] = [:]
     let applyButton = NSButton(title: "Apply wallpaper", target: nil, action: nil)
     let automatic = NSButton(
         checkboxWithTitle: "Update automatically while running", target: nil, action: nil)
@@ -124,7 +143,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     var fetching = false
     var refreshFailure: String?
     var rendering = false
-    var rerender = false
+    private var pendingApply: Bool?
     var displaySelectionGeneration = 0
     var dataGeneration = 0
     var timer: Timer?
@@ -136,6 +155,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     var refreshInterval: TimeInterval { savedRefreshInterval(saved["refreshInterval"] as? Double) }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let startsInMenuBar = launchedAtLogin(NSAppleEventManager.shared().currentAppleEvent)
         do { try migrateLegacyWorkspace() } catch {
             status.stringValue =
                 "Could not migrate older app data. The original files were kept. \(error.localizedDescription)"
@@ -149,6 +169,8 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                             ? stateURL : seed)) as? [String: Any]
             else { throw WallpaperError.invalid("Expected a settings object.") }
             saved = stored
+            saved.removeValue(forKey: "lastHash")
+            saved.removeValue(forKey: "displayHashes")
         } catch {
             stateReadable = false
             stateLoadError =
@@ -181,7 +203,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 do { _ = try await self.js("return true;") } catch { self.reportEditorError(error) }
             }
         }
-        NSApp.setActivationPolicy(.regular)
+        NSApp.setActivationPolicy(startsInMenuBar ? .accessory : .regular)
         let menu = NSMenu()
         let appItem = NSMenuItem()
         menu.addItem(appItem)
@@ -199,6 +221,11 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         appMenu.addItem(settings)
+        appMenu.addItem(.separator())
+        let hide = NSMenuItem(
+            title: "Hide Wapacal", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        hide.target = NSApp
+        appMenu.addItem(hide)
         appMenu.addItem(.separator())
         appMenu.addItem(quit)
         appItem.submenu = appMenu
@@ -240,9 +267,18 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         calendarItem.title = "Calendar"
         let calendarMenu = NSMenu(title: "Calendar")
         let refresh = NSMenuItem(
-            title: "Refresh & Apply", action: #selector(refreshAndApplyNow), keyEquivalent: "r")
+            title: "Refresh", action: #selector(refreshNow), keyEquivalent: "r")
         refresh.target = self
         calendarMenu.addItem(refresh)
+        let refreshAndApply = NSMenuItem(
+            title: "Refresh & Apply", action: #selector(refreshAndApplyNow), keyEquivalent: "R")
+        refreshAndApply.target = self
+        refreshAndApply.keyEquivalentModifierMask = [.command, .shift]
+        calendarMenu.addItem(refreshAndApply)
+        let applyWallpaper = NSMenuItem(
+            title: "Apply Wallpaper", action: #selector(applyNow), keyEquivalent: "\r")
+        applyWallpaper.target = self
+        calendarMenu.addItem(applyWallpaper)
         calendarItem.submenu = calendarMenu
         menu.addItem(calendarItem)
 
@@ -253,10 +289,14 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             title: "Close Window", action: #selector(closeWindow), keyEquivalent: "w")
         close.target = self
         windowMenu.addItem(close)
+        let hideWindow = NSMenuItem(
+            title: "Hide Window", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        hideWindow.target = NSApp
+        windowMenu.addItem(hideWindow)
         windowItem.submenu = windowMenu
         menu.addItem(windowItem)
         NSApp.mainMenu = menu
-        item = NSStatusBar.system.statusItem(withLength: 20)
+        item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
             button.image = statusItemIcon()
             button.imagePosition = .imageOnly
@@ -287,7 +327,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         buildSettingsWindow()
         let root = NSView()
         _ = editorView.view
-        screenPicker.setAccessibilityLabel("Wallpaper display")
+        screenPicker.setAccessibilityLabel("Calendar output size")
         screenPicker.widthAnchor.constraint(lessThanOrEqualToConstant: 260).isActive = true
         let apply = applyButton
         apply.target = self
@@ -405,8 +445,8 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             }
         }
         editorView.canExport = { [weak self] in self?.ready == true && self?.exporting == false }
-        editorView.onExport = { [weak self] heic, theme in
-            self?.exportImage(heic: heic, theme: theme)
+        editorView.onExport = { [weak self] format, theme in
+            self?.exportCalendar(format, theme: theme)
         }
         engine.onFailure = { [weak self] error in
             self?.ready = false
@@ -438,6 +478,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(tick), name: NSWorkspace.didWakeNotification, object: nil)
         Task { @MainActor in
+            await requestStartupCalendarAccess()
             do {
                 try await engine.start()
                 workerStarted = true
@@ -445,12 +486,15 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 // The editor includes all calendar events; clear the retired course filter.
                 var editor = saved["editor"] as? [String: Any] ?? [:]
                 editor["course"] = ""
+                if a4Paper {
+                    editor.merge(A4Paper.previewDimensions) { _, size in size }
+                }
                 saved["editor"] = editor
                 _ = try await js("return window.nativeLoad(payload)", ["payload": saved])
                 ready = true
                 editorView.setReady(true)
                 updateDisplayResolution()
-                if !customResolution && !allDisplays { useDisplayResolution() }
+                if usesWallpaperDisplay && !allDisplays { useDisplayResolution() }
                 persist()
                 status.stringValue = "Saved calendar loaded. Your edits are saved automatically."
                 tick()
@@ -460,7 +504,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
-        show()
+        if !startsInMenuBar { show() }
         for file in pendingFiles { openExportFile(file) }
         pendingFiles.removeAll()
     }
@@ -469,7 +513,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         editorChangeGeneration += 1
         let changeGeneration = editorChangeGeneration
         let selectionGeneration = displaySelectionGeneration
-        if let width = patch["width"] as? Int, let height = patch["height"] as? Int,
+        if !a4Paper, let width = patch["width"] as? Int, let height = patch["height"] as? Int,
             (1280...7680).contains(width), (720...4320).contains(height),
             let selection = saved["screen"] as? String
         {
@@ -504,7 +548,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         wallpaperWarningHeight?.constant = shared ? 56 : 0
     }
     func refreshWallpaperSharingWarning() {
-        showWallpaperSharingWarning(wallpaperSharesAllSpacesAndDisplays())
+        showWallpaperSharingWarning(!a4Paper && wallpaperSharesAllSpacesAndDisplays())
     }
     func applicationDidBecomeActive(_ notification: Notification) {
         refreshWallpaperSharingWarning()
@@ -823,11 +867,13 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     }
     @objc func updateScreens() {
         let previous = saved["screen"] as? String
-        let wasConnected = screenPicker.itemArray.contains {
-            ($0.representedObject as? String) == previous
-        }
+        let screens = NSScreen.screens
+        let sizes = Dictionary(
+            uniqueKeysWithValues: screens.map { (screenID($0), wallpaperPixelSize($0)) })
+        let changedDisplays = sizes.filter { connectedDisplaySizes[$0.key] != $0.value }
+        connectedDisplaySizes = sizes
         screenPicker.removeAllItems()
-        for screen in NSScreen.screens {
+        for screen in screens {
             screenPicker.addItem(withTitle: screen.localizedName)
             screenPicker.lastItem?.representedObject = screenID(screen)
         }
@@ -835,30 +881,28 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         screenPicker.lastItem?.representedObject = "all"
         screenPicker.addItem(withTitle: "Custom resolution")
         screenPicker.lastItem?.representedObject = "custom"
-        if previous == "all" || previous == "custom" {
-            screenPicker.selectItem(
-                at: screenPicker.itemArray.firstIndex {
-                    $0.representedObject as? String == previous
-                }!)
-        } else if let index = NSScreen.screens.firstIndex(where: { screenID($0) == previous }) {
+        screenPicker.addItem(withTitle: "A4 landscape")
+        screenPicker.lastItem?.representedObject = "a4"
+        if let index = screenPicker.itemArray.firstIndex(where: {
+            $0.representedObject as? String == previous
+        }) {
             screenPicker.selectItem(at: index)
         } else if previous != nil {
             screenPicker.select(nil)
         }
         updateDisplayResolution()
-        if ready, !customResolution, !allDisplays { useDisplayResolution() }
-        if ready, previous != nil, (!wasConnected || previous == "all"),
-            screenPicker.selectedItem != nil
-        {
-            saved.removeValue(forKey: "lastHash")
-            saved.removeValue(forKey: "displayHashes")
-            persist()
-            if automatic.state == .on { applyNow() }
-        }
+        guard ready, usesWallpaperDisplay,
+            let selected = screenPicker.selectedItem?.representedObject as? String,
+            allDisplays ? !changedDisplays.isEmpty : changedDisplays[selected] != nil
+        else { return }
+        displaySelectionGeneration &+= 1
+        if !allDisplays { useDisplayResolution() }
+        if previous != nil, automatic.state == .on { requestWallpaperApply(force: false) }
     }
     @objc func changeScreen() {
+        window?.makeFirstResponder(nil)
         var sizes = saved["displaySizes"] as? [String: [String: Int]] ?? [:]
-        if let previous = saved["screen"] as? String, sizes[previous] == nil,
+        if !a4Paper, let previous = saved["screen"] as? String, sizes[previous] == nil,
             let width = editorView.editor["width"] as? Int,
             let height = editorView.editor["height"] as? Int
         {
@@ -867,17 +911,17 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         }
         displaySelectionGeneration &+= 1
         saved["screen"] = screenPicker.selectedItem?.representedObject as? String
-        saved.removeValue(forKey: "lastHash")
-        saved.removeValue(forKey: "displayHashes")
         persist()
         updateDisplayResolution()
+        refreshWallpaperSharingWarning()
         guard ready, let selection = saved["screen"] as? String else { return }
         if selection == "all" {
             changePreviewResolution()
             return
         }
         var dimensions = customResolution ? sizes[selection] : nil
-        if !customResolution, let screen = try? targetScreen() {
+        if a4Paper { dimensions = A4Paper.previewDimensions }
+        if usesWallpaperDisplay, let screen = try? targetScreen() {
             let size = wallpaperPixelSize(screen)
             dimensions = ["width": Int(size.width), "height": Int(size.height)]
         }
@@ -889,13 +933,16 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     }
     var allDisplays: Bool { saved["screen"] as? String == "all" }
     var customResolution: Bool { saved["screen"] as? String == "custom" }
+    var a4Paper: Bool { saved["screen"] as? String == "a4" }
+    var usesWallpaperDisplay: Bool { !customResolution && !a4Paper }
     func updateDisplayResolution() {
         let button = editorView.displayResolution
         let resolution = editorView.resolution
         button.isHidden = true
+        screenPicker.isEnabled = ready
         editorView.imageSizeField.isHidden = !customResolution
-        applyButton.isEnabled = ready && !customResolution
-        applyButton.toolTip = customResolution ? "Choose a display to apply wallpaper." : nil
+        applyButton.isEnabled = ready && usesWallpaperDisplay
+        applyButton.toolTip = usesWallpaperDisplay ? nil : "Choose a display to apply wallpaper."
         editorView.previewResolution.isHidden = !allDisplays
         editorView.previewResolutionField.isHidden = !allDisplays
         if allDisplays {
@@ -928,7 +975,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         if resolution.item(withTitle: "Use screen sizes") != nil {
             editorView.updateResolutionMenu()
         }
-        resolution.isEnabled = ready
+        resolution.isEnabled = ready && !a4Paper
         guard let screen = try? targetScreen() else {
             button.title = "Choose a connected display"
             button.isEnabled = false
@@ -1062,7 +1109,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             }
         }
     }
-    func exportImage(heic: Bool, theme: String? = nil) {
+    func exportCalendar(_ format: ExportFormat, theme: String? = nil) {
         guard ready, !exporting else { return }
         exporting = true
         editorView.exportMenu.isEnabled = false
@@ -1076,33 +1123,44 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 guard lastEditorError == nil else { return }
                 let rendered =
                     try await js(
-                        heic
+                        format == .heic
                             ? "return await window.nativePair()"
-                            : "return await window.nativePNG(\(theme == "light" ? "'light'" : theme == "dark" ? "'dark'" : "null"))",
+                            : "return await window.nativePNG(theme || null)",
+                        ["theme": theme ?? ""],
                         updates: false) as? [String: Any]
                     ?? [:]
                 let panel = NSSavePanel()
-                panel.allowedContentTypes = heic ? [.heic] : [.png]
-                panel.nameFieldStringValue =
-                    heic ? "wapacal.heic" : theme.map { "wapacal-\($0).png" } ?? "wapacal.png"
+                panel.allowedContentTypes = [format.contentType]
+                let suffix = theme.map { "-\($0)" } ?? ""
+                panel.nameFieldStringValue = "wapacal\(suffix).\(format.rawValue)"
                 guard await panel.beginSheetModal(for: window) == .OK, let url = panel.url else {
                     return
                 }
-                if heic {
+                if format == .heic {
                     let parsed = try JSONDecoder().decode(
                         PairExport.self, from: JSONSerialization.data(withJSONObject: rendered))
                     guard let light = Data(base64Encoded: parsed.light),
                         let dark = Data(base64Encoded: parsed.dark)
                     else { throw WallpaperError.invalid("Could not render both appearances.") }
                     try encodePair(light: loadImage(light), dark: loadImage(dark), to: url)
+                    status.stringValue = "HEIC saved with light and dark appearances."
                 } else {
                     guard let png = rendered["png"] as? String, let bytes = Data(base64Encoded: png)
                     else { throw WallpaperError.invalid("Could not render the PNG.") }
-                    try bytes.write(to: url, options: .atomic)
+                    if format == .pdf {
+                        try A4Paper.writePDF(try loadImage(bytes), to: url)
+                        status.stringValue = "A4 PDF saved."
+                    } else {
+                        try bytes.write(to: url, options: .atomic)
+                        status.stringValue = "PNG saved."
+                    }
                 }
-                status.stringValue =
-                    heic ? "HEIC saved with light and dark appearances." : "PNG saved."
-            } catch { reportEditorError(error) }
+            } catch {
+                let detail =
+                    (error as NSError).userInfo["WKJavaScriptExceptionMessage"] as? String
+                    ?? error.localizedDescription
+                status.stringValue = "Could not export \(format.rawValue.uppercased()). \(detail)"
+            }
         }
     }
     var subscriptions: [[String: Any]] { saved["subscriptions"] as? [[String: Any]] ?? [] }
@@ -1508,7 +1566,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             finishLocalRefresh()
             guard succeeded else { return }
             if key == "url" {
-                refreshNow()
+                refreshAfterSavingSource(apply: false)
             } else if automatic.state == .on {
                 await makeAndApply(force: false)
             }
@@ -1565,7 +1623,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             guard generation == dataGeneration else { return }
             fetching = false
             finishLocalRefresh()
-            if succeeded { refreshNow() }
+            if succeeded { refreshAfterSavingSource(apply: false) }
         }
     }
     func updateMessageVisibility() {
@@ -1616,27 +1674,32 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 let changed = try await js("return window.nativeDay()")
                 if changed as? Bool == true {
                     persist()
-                    if automatic.state == .on { applyNow() }
+                    if automatic.state == .on { requestWallpaperApply(force: false) }
                 }
             } catch { status.stringValue = error.localizedDescription }
         }
         if nextCheck <= Date() { beginRefresh(force: false) }
     }
-    @objc func refreshNow() { refreshAfterSavingSource(apply: false) }
+    @objc func refreshNow() { refreshAfterSavingSource(apply: false, allowAutomaticApply: false) }
     @objc func refreshAndApplyNow() { refreshAfterSavingSource(apply: true) }
-    private func refreshAfterSavingSource(apply: Bool) {
+    private func refreshAfterSavingSource(apply: Bool, allowAutomaticApply: Bool = true) {
         window?.makeFirstResponder(nil)
         guard pendingSourceSaves > 0 else {
-            beginRefresh(force: true, applyAfterRefresh: apply)
+            beginRefresh(
+                force: true, applyAfterRefresh: apply, allowAutomaticApply: allowAutomaticApply)
             return
         }
         let pendingSave = sourceSaveTask
         Task { @MainActor in
             await pendingSave?.value
-            beginRefresh(force: true, applyAfterRefresh: apply)
+            beginRefresh(
+                force: true, applyAfterRefresh: apply, allowAutomaticApply: allowAutomaticApply)
         }
     }
-    func beginRefresh(force: Bool, applyAfterRefresh: Bool = false, localOnly: Bool = false) {
+    func beginRefresh(
+        force: Bool, applyAfterRefresh: Bool = false, localOnly: Bool = false,
+        allowAutomaticApply: Bool = true
+    ) {
         guard ready else { return }
         if fetching {
             if localOnly { localRefreshPending = true }
@@ -1674,7 +1737,8 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             let range: [String: String]
             do {
                 guard
-                    let result = try await js("return window.nativeCalendarWindow()")
+                    let result = try await js(
+                        "return window.nativeCalendarWindow()", updates: false)
                         as? [String: String]
                 else {
                     throw WallpaperError.invalid("Could not determine the calendar date range.")
@@ -1692,12 +1756,14 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 status.stringValue = error.localizedDescription
                 return
             }
+            var candidates = [[String: Any]?](repeating: nil, count: sources.count)
             for index in sources.indices {
                 guard generation == dataGeneration else { return }
                 let source = sources[index]
                 let isLocal = source["provider"] as? String == "eventkit"
                 if localOnly && !isLocal { continue }
                 if isLocal {
+                    var candidate = source
                     do {
                         // Revocation also clears disabled calendars' cached private events.
                         if !localCalendars.hasAccess { throw LocalCalendarError.accessUnavailable }
@@ -1710,28 +1776,20 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                         let snapshot = try await localCalendars.snapshot(
                             identifier: identifier, from: from, to: to)
                         guard generation == dataGeneration else { return }
-                        sources[index]["snapshot"] = snapshot
-                        sources[index]["fetchedAt"] = ISO8601DateFormatter().string(from: Date())
-                        sources[index].removeValue(forKey: "error")
+                        candidate["snapshot"] = snapshot
+                        candidate["fetchedAt"] = ISO8601DateFormatter().string(from: Date())
+                        candidate.removeValue(forKey: "error")
                     } catch {
                         guard generation == dataGeneration else { return }
                         if error is LocalCalendarError {
-                            sources[index].removeValue(forKey: "snapshot")
+                            candidate.removeValue(forKey: "snapshot")
                         }
-                        sources[index]["error"] = error.localizedDescription
+                        candidate["error"] = error.localizedDescription
                         failures.append(
                             "\(source["name"] as? String ?? "Calendar"): \(error.localizedDescription)"
                         )
                     }
-                    do {
-                        _ = try await js(
-                            "return window.nativeSources(subscriptions,clearCourse)",
-                            ["subscriptions": sources, "clearCourse": false])
-                    } catch {
-                        sources[index] = source
-                        failures.append(error.localizedDescription)
-                    }
-                    guard generation == dataGeneration else { return }
+                    candidates[index] = candidate
                     continue
                 }
                 if source["enabled"] as? Bool == false { continue }
@@ -1774,24 +1832,17 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                         var candidate = source
                         candidate["ics"] = ics
                         candidate["fetchedAt"] = now
+                        candidate["checkedAt"] = now
                         candidate["etag"] = http.value(forHTTPHeaderField: "ETag")
                         candidate["modified"] = http.value(forHTTPHeaderField: "Last-Modified")
-                        var next = sources
-                        next[index] = candidate
-                        guard
-                            let reconciled = try await js(
-                                "return window.nativeCalendars(subscriptions,fetchedAt)",
-                                ["subscriptions": next, "fetchedAt": now]) as? [[String: Any]]
-                        else {
-                            throw WallpaperError.invalid("Could not save calendar history.")
-                        }
-                        guard generation == dataGeneration else { return }
-                        sources = reconciled
-                    } else if http.statusCode != 304 || source["ics"] == nil {
+                        candidate.removeValue(forKey: "error")
+                        candidates[index] = candidate
+                    } else if http.statusCode == 304 && source["ics"] != nil {
+                        sources[index]["checkedAt"] = now
+                        sources[index].removeValue(forKey: "error")
+                    } else {
                         throw WallpaperError.invalid("HTTP \(http.statusCode).")
                     }
-                    sources[index]["checkedAt"] = now
-                    sources[index].removeValue(forKey: "error")
                 } catch {
                     guard generation == dataGeneration else { return }
                     let detail =
@@ -1799,6 +1850,43 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                         ?? error.localizedDescription
                     sources[index]["error"] = detail
                     failures.append("\(source["name"] as? String ?? "Calendar"): \(detail)")
+                }
+            }
+            guard generation == dataGeneration else { return }
+            if !localCalendars.hasAccess {
+                for index in sources.indices
+                where sources[index]["provider"] as? String == "eventkit"
+                    && (sources[index]["snapshot"] != nil || candidates[index]?["snapshot"] != nil)
+                {
+                    sources[index].removeValue(forKey: "snapshot")
+                    var candidate = candidates[index] ?? sources[index]
+                    candidate.removeValue(forKey: "snapshot")
+                    candidate["error"] = LocalCalendarError.accessUnavailable.localizedDescription
+                    candidates[index] = candidate
+                }
+            }
+            let changes: [[String: Any]] = candidates.enumerated().compactMap { index, source in
+                source.map { ["index": index, "source": $0] }
+            }
+            if !changes.isEmpty {
+                do {
+                    guard
+                        let result = try await js(
+                            "return window.nativeRefresh(subscriptions, candidates)",
+                            ["subscriptions": sources, "candidates": changes], updates: false
+                        ) as? [String: Any],
+                        let refreshed = result["subscriptions"] as? [[String: Any]],
+                        let errors = result["failures"] as? [String],
+                        let changed = result["changed"] as? Bool
+                    else {
+                        throw WallpaperError.invalid("Could not save refreshed calendars.")
+                    }
+                    sources = refreshed
+                    failures.append(contentsOf: errors)
+                    if changed { _ = try await js("return true;") }
+                } catch {
+                    guard generation == dataGeneration else { return }
+                    failures.append(error.localizedDescription)
                 }
             }
             guard generation == dataGeneration else { return }
@@ -1822,7 +1910,9 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 refreshFailure
                 ?? "Calendars checked at \(Date().formatted(date:.omitted,time:.shortened))."
             localApplyPending = localApplyPending || applyAfterRefresh
-            if !localRefreshPending && (localApplyPending || automatic.state == .on) {
+            if !localRefreshPending
+                && (localApplyPending || (allowAutomaticApply && automatic.state == .on))
+            {
                 let forceApply = localApplyPending
                 localApplyPending = false
                 await makeAndApply(force: forceApply)
@@ -1830,28 +1920,31 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         }
     }
     @objc func applyNow() {
-        guard !customResolution else { return }
+        guard usesWallpaperDisplay else { return }
         window?.makeFirstResponder(nil)
+        requestWallpaperApply(force: true)
+    }
+    private func requestWallpaperApply(force: Bool) {
         let pendingSave = sourceSaveTask
         Task { @MainActor in
             await pendingSave?.value
-            await makeAndApply(force: true)
+            await makeAndApply(force: force)
         }
     }
     func makeAndApply(force: Bool) async {
         refreshWallpaperSharingWarning()
         while pendingEdits > 0 { try? await Task.sleep(nanoseconds: 50_000_000) }
-        guard ready, !customResolution, lastEditorError == nil else { return }
+        guard ready, usesWallpaperDisplay, lastEditorError == nil else { return }
         if rendering {
-            rerender = true
+            pendingApply = force || pendingApply == true
             return
         }
         rendering = true
         defer {
             rendering = false
-            if rerender {
-                rerender = false
-                Task { @MainActor in await makeAndApply(force: false) }
+            if let pending = pendingApply {
+                pendingApply = nil
+                Task { @MainActor in await makeAndApply(force: pending) }
             }
         }
         do {
@@ -1868,6 +1961,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                     (screenID($0), NSWorkspace.shared.desktopImageURL(for: $0)?.standardizedFileURL)
                 })
             var failures: [String] = []
+            var applied = 0
             for screen in screens {
                 do {
                     let size = wallpaperPixelSize(screen)
@@ -1876,32 +1970,44 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                     }
                     let dimensions: [String: Any] =
                         ["width": Int(size.width), "height": Int(size.height)]
+                    let installed = force ? "" : installedFingerprint(on: screen)
                     guard
-                        let pair = try await js(
-                            "return await window.nativePair(size)", ["size": dimensions],
+                        let result = try await js(
+                            "return await window.nativeWallpaper(size, installed)",
+                            ["size": dimensions, "installed": installed],
                             updates: false
-                        ) as? [String: Any]
+                        ) as? [String: Any],
+                        let fingerprint = result["fingerprint"] as? String
                     else {
                         throw WallpaperError.invalid("Could not render the wallpaper.")
                     }
-                    guard saved["screen"] as? String == selection else {
-                        rerender = true
-                        return
-                    }
-                    guard displaySelectionGeneration == operationGeneration else {
-                        rerender = true
+                    guard saved["screen"] as? String == selection,
+                        displaySelectionGeneration == operationGeneration
+                    else {
+                        pendingApply = force || pendingApply == true
                         return
                     }
                     guard NSScreen.screens.contains(where: { screenID($0) == screenID(screen) })
                     else {
                         throw WallpaperError.invalid("Display disconnected.")
                     }
-                    try install(pair, screen: screen, force: force)
+                    if fingerprint == installed {
+                        // The active Space can change while WebKit checks the images.
+                        if installedFingerprint(on: screen) != installed, pendingApply == nil {
+                            pendingApply = false
+                        }
+                        continue
+                    }
+                    guard let pair = result["pair"] as? [String: Any] else {
+                        throw WallpaperError.invalid("Could not render the wallpaper.")
+                    }
+                    try install(pair, screen: screen, fingerprint: fingerprint)
+                    applied += 1
                 } catch {
                     failures.append("\(screen.localizedName): \(error.localizedDescription)")
                 }
             }
-            if !allDisplays, failures.isEmpty {
+            if applied > 0, !allDisplays, failures.isEmpty {
                 let targetIDs = Set(screens.map(screenID))
                 let changedOther = NSScreen.screens.first { other in
                     guard !targetIDs.contains(screenID(other)) else { return false }
@@ -1916,37 +2022,48 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             }
             if !failures.isEmpty {
                 status.stringValue = failures.joined(separator: " ")
-            } else if allDisplays && refreshFailure == nil {
+            } else if allDisplays && applied > 0 && refreshFailure == nil {
                 status.stringValue =
-                    "Wallpaper applied to \(screens.count) displays at their own resolutions."
+                    "Wallpaper updated on \(applied) of \(screens.count) connected displays."
             }
         } catch { status.stringValue = "Wallpaper kept. \(error.localizedDescription)" }
     }
-    func install(_ pair: [String: Any], screen: NSScreen, force: Bool) throws {
-        let data = try JSONSerialization.data(withJSONObject: pair, options: [.sortedKeys])
-        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        var hashes = saved["displayHashes"] as? [String: String] ?? [:]
-        if !force && hashes[screenID(screen)] == digest {
-            return
-        }
+    private func installedFingerprint(on screen: NSScreen) -> String {
+        let installations = saved["installedWallpapers"] as? [String: [String: String]]
+        guard let record = installations?[screenID(screen)],
+            let path = record["path"],
+            NSWorkspace.shared.desktopImageURL(for: screen)?.standardizedFileURL.path == path,
+            FileManager.default.fileExists(atPath: path)
+        else { return "" }
+        return record["fingerprint"] ?? ""
+    }
+    private func install(_ pair: [String: Any], screen: NSScreen, fingerprint: String) throws {
+        let data = try JSONSerialization.data(withJSONObject: pair)
         let parsed = try JSONDecoder().decode(PairExport.self, from: data)
         guard let light = Data(base64Encoded: parsed.light),
             let dark = Data(base64Encoded: parsed.dark)
         else { throw WallpaperError.invalid("Could not render both appearances.") }
         let file = wallpapersDirectory().appendingPathComponent("editor-wallpaper.heic")
         try encodePair(light: loadImage(light), dark: loadImage(dark), to: file)
-        let restorable = try applyWallpaper(file, screen: screen)
-        hashes[screenID(screen)] = digest
-        saved["displayHashes"] = hashes
+        let application = try applyWallpaper(file, screen: screen)
+        var installations = saved["installedWallpapers"] as? [String: [String: String]] ?? [:]
+        installations[screenID(screen)] = [
+            "fingerprint": fingerprint, "path": application.url.standardizedFileURL.path,
+        ]
+        saved["installedWallpapers"] = installations
         if !allDisplays { saved["screen"] = screenID(screen) }
         persist()
         status.stringValue =
             refreshFailure
-            ?? (restorable
+            ?? (application.canRestore
                 ? "Wallpaper applied. macOS switches between light and dark."
                 : "Wallpaper applied. The previous wallpaper file is unavailable for restoration.")
     }
     @objc func restore() {
+        guard !a4Paper else {
+            status.stringValue = "Choose a display to restore wallpaper."
+            return
+        }
         guard !rendering else {
             status.stringValue = "Wait for the current wallpaper operation to finish."
             return
@@ -1954,8 +2071,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         do {
             automatic.state = .off
             saved["autoApply"] = false
-            saved.removeValue(forKey: "lastHash")
-            saved.removeValue(forKey: "displayHashes")
+            saved.removeValue(forKey: "installedWallpapers")
             persist()
             var failures: [String] = []
             for screen in try targetScreens() {
@@ -1999,6 +2115,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 "subscriptions": [] as [[String: Any]], "courseCode": "", "refreshInterval": 3600.0,
                 "nextCheck": 0.0,
             ]
+            updateScreens()
             updateMessageVisibility()
             reloadSources()
             refreshPicker.selectItem(at: 2)

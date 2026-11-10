@@ -1,5 +1,5 @@
 // Internal worker API. No interface, DOM event handlers, storage, or network access.
-// AppKit owns presentation and persistence. These names also support legacy callers.
+// AppKit owns presentation and persistence.
 const nativeDefaults = (() => {
   const today = localParts(new Date(), config.timeZone).date;
   return {
@@ -54,6 +54,22 @@ let data = { name: 'Calendar', events: [] };
 let calendarSources = [];
 let courseCode = config.course || '';
 let revision = 0;
+let currentRender;
+
+function renderState(nextData, options) {
+  return {
+    appearance: resolveTheme(options.theme, options.systemTheme),
+    result: renderWallpaper(nextData.events, options),
+  };
+}
+
+function editorRender() {
+  const options = renderOptions(state);
+  if (currentRender?.appearance !== resolveTheme(options.theme, options.systemTheme))
+    currentRender = renderState(data, options);
+  return currentRender.result;
+}
+
 function advancedDay(previous) {
   const today = localParts(new Date(), previous.timeZone).date;
   return {
@@ -67,7 +83,7 @@ function advancedDay(previous) {
 }
 function commit(nextData, next) {
   // All replacements are transactional, including invalid date ranges and dimensions.
-  renderWallpaper(nextData.events, renderOptions(next));
+  currentRender = renderState(nextData, renderOptions(next));
   data = nextData;
   state = next;
   revision++;
@@ -79,24 +95,15 @@ window.nativeLoad = function (payload) {
   next.excludedEventIds = Array.isArray(next.excludedEventIds)
     ? next.excludedEventIds.filter((id) => typeof id === 'string')
     : [];
-  const parsed = payload.subscriptions
-    ? parseCalendars(payload.subscriptions, next.timeZone, next)
-    : payload.ics
-      ? parseCalendar(payload.ics, next.timeZone, 'auto', next)
-      : { name: 'Calendar', events: [] };
-  const fetchedAt =
-    payload.fetchedAt ||
-    payload.subscriptions
-      ?.map((s) => s.fetchedAt)
-      .filter(Boolean)
-      .sort()[0];
+  const subscriptions = payload.subscriptions || [];
+  const parsed = parseCalendars(subscriptions, next.timeZone, next);
+  const fetchedAt = subscriptions
+    .map((s) => s.fetchedAt)
+    .filter(Boolean)
+    .sort()[0];
   if (fetchedAt) next.snapshotDate = localParts(fetchedAt, next.timeZone).date;
   commit(parsed, next);
-  calendarSources = payload.subscriptions
-    ? payload.subscriptions
-    : payload.ics
-      ? [{ id: 'legacy', legacyIds: true, ics: payload.ics, fetchedAt: payload.fetchedAt }]
-      : [];
+  calendarSources = subscriptions;
   if (Object.hasOwn(payload, 'courseCode')) courseCode = payload.courseCode || '';
   return true;
 };
@@ -199,13 +206,6 @@ window.nativeReset = function () {
   courseCode = '';
   return true;
 };
-window.nativeFeed = (ics, fetchedAt) => {
-  const previous = calendarSources.find((source) => source.id === 'legacy') || {};
-  return window.nativeCalendars(
-    [{ ...previous, id: 'legacy', legacyIds: true, ics, fetchedAt }],
-    fetchedAt,
-  );
-};
 window.nativeCalendars = function (subscriptions, fetchedAt) {
   const reconciled = reconcileSubscriptions(
     calendarSources,
@@ -218,6 +218,49 @@ window.nativeCalendars = function (subscriptions, fetchedAt) {
   calendarSources = reconciled;
   return reconciled;
 };
+window.nativeRefresh = function (subscriptions, candidates) {
+  const failures = [];
+  // Each candidate still has to pass combined layout validation. Reuse the
+  // normalized events of other sources for as long as the date window matches.
+  const caches = new Map();
+  let changed = false;
+  for (const { index, source } of candidates) {
+    const previous = subscriptions[index];
+    const remote = source.provider !== 'eventkit';
+    try {
+      let options = state;
+      let refreshed = source;
+      if (remote) {
+        [refreshed] = reconcileSubscriptions(
+          [previous],
+          [source],
+          source.fetchedAt,
+          state.timeZone,
+        );
+        options = {
+          ...advancedDay(state),
+          snapshotDate: localParts(source.fetchedAt, state.timeZone).date,
+        };
+      }
+      const key = JSON.stringify(recurrenceWindow(options, options.timeZone));
+      if (!caches.has(key)) caches.set(key, new WeakMap());
+      const next = subscriptions.slice();
+      next[index] = refreshed;
+      commit(parseCalendars(next, options.timeZone, options, caches.get(key)), options);
+      subscriptions = next;
+      changed = true;
+    } catch (error) {
+      if (remote) {
+        subscriptions[index] = { ...previous, error: error.message };
+        failures.push(`${source.name ?? 'Calendar'}: ${error.message}`);
+      } else {
+        failures.push(error.message);
+      }
+    }
+  }
+  if (changed) calendarSources = subscriptions;
+  return { subscriptions, failures, changed };
+};
 window.nativeDay = function () {
   const next = advancedDay(state);
   return next.today === state.today
@@ -225,7 +268,7 @@ window.nativeDay = function () {
     : commit(parseCalendars(calendarSources, next.timeZone, next), next);
 };
 window.nativeSnapshot = function () {
-  const result = renderWallpaper(data.events, renderOptions(state));
+  const result = editorRender();
   const candidates = buildGrid(data.events, { ...state, excludedEventIds: [] }).visible;
   return {
     revision,
@@ -249,6 +292,7 @@ window.nativeSnapshot = function () {
 };
 async function pngBase64(svg) {
   const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+  const canvas = document.createElement('canvas');
   try {
     const image = new Image();
     await new Promise((resolve, reject) => {
@@ -261,23 +305,30 @@ async function pngBase64(svg) {
         await image.decode();
       } catch {}
     }
-    const canvas = document.createElement('canvas');
     canvas.width = image.naturalWidth;
     canvas.height = image.naturalHeight;
-    canvas.getContext('2d').drawImage(image, 0, 0);
-    return canvas.toDataURL('image/png').split(',')[1];
+    // PNG encoding reads the entire canvas. Keep the pixels in software memory.
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) throw new Error('Could not allocate the wallpaper canvas.');
+    context.drawImage(image, 0, 0);
+    const png = canvas.toDataURL('image/png').split(',')[1];
+    if (!png) throw new Error('Could not encode the wallpaper PNG.');
+    return png;
   } finally {
+    // Release the pixel buffer before the next preview or export.
+    canvas.width = 0;
     URL.revokeObjectURL(url);
   }
 }
 window.nativePNG = async function (theme) {
   const currentRevision = revision;
-  const png = await pngBase64(
-    renderWallpaper(data.events, renderOptions(theme ? { ...state, theme } : state)).svg,
-  );
+  const result = theme
+    ? renderWallpaper(data.events, renderOptions({ ...state, theme }))
+    : editorRender();
+  const png = await pngBase64(result.svg);
   return { revision: currentRevision, png };
 };
-window.nativePair = async function (size = {}) {
+function renderPair(size) {
   // Capture both SVGs before yielding so edits cannot mix two different calendars.
   const options = {
     ...state,
@@ -286,6 +337,20 @@ window.nativePair = async function (size = {}) {
   };
   const lightSVG = renderWallpaper(data.events, { ...options, theme: 'light' }).svg;
   const darkSVG = renderWallpaper(data.events, { ...options, theme: 'dark' }).svg;
-  const name = state.name;
+  return { name: state.name, lightSVG, darkSVG };
+}
+async function rasterizePair({ name, lightSVG, darkSVG }) {
   return { version: 1, name, light: await pngBase64(lightSVG), dark: await pngBase64(darkSVG) };
+}
+window.nativePair = async function (size = {}) {
+  return rasterizePair(renderPair(size));
+};
+window.nativeWallpaper = async function (size, installedFingerprint) {
+  const images = renderPair(size);
+  const input = new TextEncoder().encode(JSON.stringify([images.lightSVG, images.darkSVG]));
+  const digest = await crypto.subtle.digest('SHA-256', input);
+  const fingerprint = btoa(String.fromCharCode(...new Uint8Array(digest)));
+  return fingerprint === installedFingerprint
+    ? { fingerprint }
+    : { fingerprint, pair: await rasterizePair(images) };
 };

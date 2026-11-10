@@ -82,32 +82,21 @@ test('same UID across calendars stays independent and legacy exclusions keep the
   assert.equal(parseCalendars([]).events.length, 0);
 });
 
-test('configuration supports legacy URLs, detects TimeEdit, rejects duplicates and HTTP', () => {
-  const source = configuredSubscriptions(
-    { subscriptionUrl: 'https://cloud.timeedit.net/example.ics' },
-    {},
-  )[0];
-  assert.equal(source.legacyIds, true);
+test('configuration detects TimeEdit and rejects duplicate subscriptions and HTTP', () => {
+  const source = configuredSubscriptions({
+    subscriptions: [{ id: 'schedule', url: 'https://cloud.timeedit.net/example.ics' }],
+  })[0];
   assert.equal(source.kind, 'timeedit');
   assert.throws(
     () =>
-      configuredSubscriptions(
-        { subscriptions: [{ id: 'a', url: 'http://example.com/calendar' }] },
-        {},
-      ),
+      configuredSubscriptions({ subscriptions: [{ id: 'a', url: 'http://example.com/calendar' }] }),
     /HTTPS/,
   );
   assert.throws(
-    () => configuredSubscriptions({ subscriptions: [source, { ...source, id: 'b' }] }, {}),
+    () => configuredSubscriptions({ subscriptions: [source, { ...source, id: 'b' }] }),
     /unique/,
   );
-  assert.equal(
-    configuredSubscriptions(
-      { subscriptions: [] },
-      { CALENDAR_URL: 'https://example.com/calendar' },
-    )[0].url,
-    'https://example.com/calendar',
-  );
+  assert.deepEqual(configuredSubscriptions({}), []);
 });
 
 test('refresh retains a failed feed, updates another, reuses validators, and drops removed feeds', async () => {
@@ -128,7 +117,7 @@ test('refresh retains a failed feed, updates another, reuses validators, and dro
       spawnSync(
         process.execPath,
         ['--input-type=module', '-e', `${code};await import(${JSON.stringify(script)})`],
-        { cwd: dir, encoding: 'utf8', env: { ...process.env, CALENDAR_URL: '' } },
+        { cwd: dir, encoding: 'utf8', env: process.env },
       );
     const first = run(
       `globalThis.fetch=async(url,{headers})=>{if(url.endsWith('/a'))throw Error('offline');if(headers['If-None-Match']!=='"b"')throw Error('missing validator');return new Response(${JSON.stringify(calendar('New B'))},{headers:{etag:'"new"'}})}`,
