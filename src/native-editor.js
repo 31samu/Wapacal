@@ -292,6 +292,7 @@ window.nativeSnapshot = function () {
 };
 async function pngBase64(svg) {
   const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+  const canvas = document.createElement('canvas');
   try {
     const image = new Image();
     await new Promise((resolve, reject) => {
@@ -304,12 +305,17 @@ async function pngBase64(svg) {
         await image.decode();
       } catch {}
     }
-    const canvas = document.createElement('canvas');
     canvas.width = image.naturalWidth;
     canvas.height = image.naturalHeight;
-    canvas.getContext('2d').drawImage(image, 0, 0);
-    return canvas.toDataURL('image/png').split(',')[1];
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Could not allocate the wallpaper canvas.');
+    context.drawImage(image, 0, 0);
+    const png = canvas.toDataURL('image/png').split(',')[1];
+    if (!png) throw new Error('Could not encode the wallpaper PNG.');
+    return png;
   } finally {
+    // Release the pixel buffer before the next preview or export.
+    canvas.width = 0;
     URL.revokeObjectURL(url);
   }
 }

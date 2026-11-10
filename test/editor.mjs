@@ -110,6 +110,33 @@ test('preview reuses the validated render and updates when system appearance cha
   dom.window.close();
 });
 
+test('PNG rendering releases the canvas even when encoding fails', async () => {
+  const { dom, w } = await setup();
+  w.URL.createObjectURL = () => 'blob:fixture';
+  w.URL.revokeObjectURL = () => {};
+  w.Image = class {
+    naturalWidth = 3508;
+    naturalHeight = 2480;
+    set src(_) {
+      this.onload();
+    }
+  };
+  let canvas;
+  let encoded = 'data:,';
+  w.HTMLCanvasElement.prototype.getContext = function () {
+    canvas = this;
+    return { drawImage() {} };
+  };
+  w.HTMLCanvasElement.prototype.toDataURL = () => encoded;
+
+  await assert.rejects(w.nativePNG(), /Could not encode the wallpaper PNG/);
+  assert.equal(canvas.width, 0);
+  encoded = 'data:image/png;base64,cG5n';
+  assert.equal((await w.nativePNG()).png, 'cG5n');
+  assert.equal(canvas.width, 0);
+  dom.window.close();
+});
+
 test('wallpaper matches the shared renderer exactly and preserves plain event details', async () => {
   const { dom, seed, snapshot } = await setup();
   const current = snapshot();

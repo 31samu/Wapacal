@@ -569,9 +569,13 @@ Task { @MainActor in
         await editorApp.makeAndApply(force: true)
         try require(!editorApp.rendering, "A4 skips wallpaper rendering")
         let a4 =
-            try await editorApp.js("return await window.nativePNG()", updates: false)
-            as! [String: Any]
-        let a4Image = try loadImage(Data(base64Encoded: a4["png"] as! String)!)
+            try await editorApp.js(
+                "return await window.nativePNG()", updates: false) as? [String: Any]
+        guard let png = a4?["png"] as? String, let bytes = Data(base64Encoded: png),
+            !bytes.isEmpty
+        else { throw WallpaperError.invalid("The A4 renderer did not return PNG data.") }
+        let a4Image = try loadImage(bytes)
+        try require(a4Image.width == 3508 && a4Image.height == 2480, "A4 PNG dimensions")
         let pdfURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["WAPACAL_UI_OUTPUT"]!)
             .appendingPathComponent("a4-calendar.pdf")
         try A4Paper.writePDF(a4Image, to: pdfURL)
