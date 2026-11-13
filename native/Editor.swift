@@ -136,6 +136,8 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     let automatic = NSButton(
         checkboxWithTitle: "Update automatically while running", target: nil, action: nil)
     let login = NSButton(checkboxWithTitle: "Open at login", target: nil, action: nil)
+    let keepInMenuBar = NSButton(
+        checkboxWithTitle: "Keep running in the menu bar", target: nil, action: nil)
     var saved: [String: Any] = [:]
     var companion: WallpaperApp?
     var pendingFiles: [String] = []
@@ -153,9 +155,10 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     var stateURL: URL { stateDirectory().appendingPathComponent("app-state.json") }
     var nextCheck: Date { Date(timeIntervalSince1970: saved["nextCheck"] as? Double ?? 0) }
     var refreshInterval: TimeInterval { savedRefreshInterval(saved["refreshInterval"] as? Double) }
+    var staysInMenuBar: Bool { saved["keepInMenuBar"] as? Bool ?? true }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let startsInMenuBar = launchedAtLogin(NSAppleEventManager.shared().currentAppleEvent)
+        let openedAtLogin = launchedAtLogin(NSAppleEventManager.shared().currentAppleEvent)
         do { try migrateLegacyWorkspace() } catch {
             status.stringValue =
                 "Could not migrate older app data. The original files were kept. \(error.localizedDescription)"
@@ -203,6 +206,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                 do { _ = try await self.js("return true;") } catch { self.reportEditorError(error) }
             }
         }
+        let startsInMenuBar = staysInMenuBar && openedAtLogin
         NSApp.setActivationPolicy(startsInMenuBar ? .accessory : .regular)
         let menu = NSMenu()
         let appItem = NSMenuItem()
@@ -315,6 +319,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             tray.addItem(entry)
         }
         item.menu = tray
+        updateMenuBarPreference()
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1200, height: 850),
             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered,
@@ -599,10 +604,11 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
     func windowWillClose(_ notification: Notification) {
         let closing = notification.object as? NSWindow
         closing?.makeFirstResponder(nil)
-        if ![window, settingsWindow, aboutWindow, companion?.window].compactMap({ $0 }).contains(
-            where: {
-                $0 !== closing && $0.isVisible
-            })
+        if staysInMenuBar,
+            ![window, settingsWindow, aboutWindow, companion?.window].compactMap({ $0 }).contains(
+                where: {
+                    $0 !== closing && $0.isVisible
+                })
         {
             NSApp.setActivationPolicy(.accessory)
         }
@@ -802,6 +808,8 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         login.target = self
         login.action = #selector(toggleLogin)
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        keepInMenuBar.target = self
+        keepInMenuBar.action = #selector(toggleMenuBar)
         let separator = NSBox()
         separator.boxType = .separator
         let settingsContent = EditorViewController.stack(
@@ -812,7 +820,10 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
                         automatic,
                         note(
                             "Updates the selected display, or all connected displays, when calendars or your edits change. Wapacal must be running."
-                        ), login, showMessages, showLayoutWarnings,
+                        ),
+                        keepInMenuBar,
+                        note("When off, Wapacal quits when you close its last window."),
+                        login, showMessages, showLayoutWarnings,
                     ], spacing: 10),
                 separator,
                 EditorViewController.stack(
@@ -1651,6 +1662,15 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         persist()
         if automatic.state == .on { applyNow() }
     }
+    private func updateMenuBarPreference() {
+        keepInMenuBar.state = staysInMenuBar ? .on : .off
+        item.isVisible = staysInMenuBar
+    }
+    @objc func toggleMenuBar() {
+        saved["keepInMenuBar"] = keepInMenuBar.state == .on
+        updateMenuBarPreference()
+        persist()
+    }
     @objc func toggleLogin() {
         do {
             if login.state == .on {
@@ -2117,6 +2137,7 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
             ]
             updateScreens()
             updateMessageVisibility()
+            updateMenuBarPreference()
             reloadSources()
             refreshPicker.selectItem(at: 2)
             persist()
@@ -2149,7 +2170,9 @@ final class EditorApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTool
         show()
         return true
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        !staysInMenuBar
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         window?.makeFirstResponder(nil)
         guard pendingEdits > 0 || pendingSourceSaves > 0 else {

@@ -976,6 +976,17 @@ Task { @MainActor in
         try require(
             editorApp.automatic.window === editorApp.settingsWindow,
             "automatic updates belong to Settings")
+        try require(
+            editorApp.keepInMenuBar.window === editorApp.settingsWindow
+                && editorApp.keepInMenuBar.state == .on && editorApp.item.isVisible,
+            "menu bar preference defaults to on in Settings")
+        editorApp.keepInMenuBar.performClick(nil)
+        try require(!editorApp.item.isVisible, "turning off the preference hides the menu bar item")
+        let menuBarState =
+            try JSONSerialization.jsonObject(
+                with: Data(contentsOf: editorApp.stateURL)) as? [String: Any]
+        try require(
+            menuBarState?["keepInMenuBar"] as? Bool == false, "menu bar preference is saved")
         editorApp.refreshPicker.selectItem(at: 0)
         editorApp.changeRefreshInterval()
         try require(editorApp.refreshInterval == 900, "refresh frequency in Settings persists")
@@ -1002,6 +1013,10 @@ Task { @MainActor in
         try require(
             editorApp.refreshPicker.indexOfSelectedItem == 1,
             "Settings reopens with retained values")
+        try require(editorApp.keepInMenuBar.state == .off, "Settings retains the menu bar choice")
+        editorApp.keepInMenuBar.performClick(nil)
+        try require(
+            editorApp.item.isVisible, "turning on the preference restores the menu bar item")
         editorApp.settingsWindow.performClose(nil)
         ui.calendarsToggle.performClick(nil)
         try require(ui.calendarFields.isHidden, "calendar disclosure closes")
@@ -1484,9 +1499,18 @@ Task { @MainActor in
             "missing calendars do not keep stale events")
         editorApp.localCalendarTimer?.invalidate()
         editorApp.saveTimer?.invalidate()
-        print("Native UI and WebKit integration checks passed")
-        hideTestApplication()
-        application.terminate(nil)
+        editorApp.keepInMenuBar.performClick(nil)
+        editorApp.window.performClose(nil)
+        try require(editorApp.settingsWindow.isVisible, "Settings stays open with the menu bar off")
+        let terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: application, queue: nil
+        ) { _ in
+            print("Native UI and WebKit integration checks passed")
+        }
+        editorApp.settingsWindow.performClose(nil)
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+        NotificationCenter.default.removeObserver(terminationObserver)
+        throw WallpaperError.invalid("Wapacal stayed open after closing its last window.")
     } catch {
         let detail =
             (error as NSError).userInfo["WKJavaScriptExceptionMessage"] as? String
